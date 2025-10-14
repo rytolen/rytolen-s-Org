@@ -1,0 +1,7 @@
+{
+  "name": "Portal Karyawan Terpadu",
+  "description": "Aplikasi web mobile lengkap untuk karyawan. Fitur termasuk absensi via pemindaian QR, melihat riwayat kehadiran, mengajukan cuti, mengecek rincian pendapatan, dan mengelola profil pribadi.",
+  "requestFramePermissions": [
+    "camera"
+  ]
+}
