@@ -24,10 +24,6 @@ const TURN_THRESHOLD_PERCENT = 0.16;
 const NOD_THRESHOLD_PERCENT = 0.07;
 const NUM_CHALLENGES = 2;
 
-// --- Low Light Enhancement Constants ---
-const LOW_LIGHT_THRESHOLD = 70; // Average pixel brightness (0-255) to trigger enhancement
-const BRIGHTNESS_FILTER = 'brightness(1.5) contrast(1.2)';
-
 // --- State Machine ---
 type ChallengeType = 'TURN_LEFT' | 'TURN_RIGHT' | 'NOD';
 const ALL_CHALLENGES: ChallengeType[] = ['TURN_LEFT', 'TURN_RIGHT', 'NOD'];
@@ -45,7 +41,7 @@ const getChallengeInstruction = (challenge: ChallengeType | null): string => {
 
 const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVerifySuccess, onVerifyFailure, registeredDescriptor, onClose }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
-    const canvasRef = useRef<HTMLCanvasElement>(null); // Canvas for pre-processing
+    const canvasRef = useRef<HTMLCanvasElement>(null); 
     const statusTextRef = useRef('Memuat model AI...');
     const [statusText, setStatusText] = useState('Memuat model AI...');
     const [error, setError] = useState<string | null>(null);
@@ -69,7 +65,6 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
     const baselineRef = useRef<{ nose: {x: number, y: number}; faceWidth: number; } | null>(null);
     const challengeStateRef = useRef({ hasMoved: false });
     const isFailureHandledRef = useRef(false);
-    const isLowLightRef = useRef(false);
 
     const updateStatusText = useCallback((newText: string, forceUpdate = false) => {
         if (statusTextRef.current !== newText || forceUpdate) {
@@ -111,44 +106,12 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
         
-        // Match canvas size to video element size for correct drawing
         canvas.width = video.videoWidth;
         canvas.height = video.videoHeight;
-
-        // --- Low Light Detection & Enhancement ---
-        ctx.filter = 'none'; // Reset filter
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        
-        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
-        const data = imageData.data;
-        let brightnessSum = 0;
-        // Sample pixels for performance instead of checking all of them
-        const sampleRate = 10; 
-        for (let i = 0; i < data.length; i += 4 * sampleRate) {
-            const r = data[i];
-            const g = data[i + 1];
-            const b = data[i + 2];
-            brightnessSum += (r + g + b) / 3;
-        }
-        const avgBrightness = brightnessSum / (data.length / (4 * sampleRate));
-        
-        const wasLowLight = isLowLightRef.current;
-        isLowLightRef.current = avgBrightness < LOW_LIGHT_THRESHOLD;
-
-        if (isLowLightRef.current) {
-            ctx.filter = BRIGHTNESS_FILTER;
-            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-             if (!wasLowLight && detectionStateRef.current !== 'PROCESSING') {
-                updateStatusText("Cahaya redup, mencoba meningkatkan gambar...", true);
-            }
-        } else {
-            if (wasLowLight && detectionStateRef.current !== 'PROCESSING') {
-                updateStatusText(getChallengeInstruction(challengeSequenceRef.current[challengeStepRef.current] || null), true);
-            }
-        }
 
         const detectorOptions = new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.5 });
-        const detection = await faceapi.detectSingleFace(canvas, detectorOptions) // Use canvas as input
+        const detection = await faceapi.detectSingleFace(canvas, detectorOptions)
             .withFaceLandmarks()
             .withFaceDescriptor();
 
@@ -217,15 +180,26 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
             const verticalThreshold = baselineRef.current.faceWidth * NOD_THRESHOLD_PERCENT;
             
             if (!challengeState.hasMoved) {
-                if (challenge === 'TURN_RIGHT' && noseTip.x < baselineRef.current.nose.x - horizontalThreshold) challengeState.hasMoved = true;
-                if (challenge === 'TURN_LEFT' && noseTip.x > baselineRef.current.nose.x + horizontalThreshold) challengeState.hasMoved = true;
-                if (challenge === 'NOD' && noseTip.y > baselineRef.current.nose.y + verticalThreshold) challengeState.hasMoved = true;
-            }
-            else {
+                 // The baseline is now stable for the duration of the challenge.
+                 // We don't update it here anymore.
+            } else {
                 if (challenge === 'TURN_RIGHT' && noseTip.x > baselineRef.current.nose.x - (horizontalThreshold / 2)) livenessPassed = true;
                 if (challenge === 'TURN_LEFT' && noseTip.x < baselineRef.current.nose.x + (horizontalThreshold / 2)) livenessPassed = true;
                 if (challenge === 'NOD' && noseTip.y < baselineRef.current.nose.y + (verticalThreshold / 2)) livenessPassed = true;
             }
+            
+            // This logic was flawed. It should detect movement AWAY from baseline, then movement back.
+            if (!challengeState.hasMoved) {
+                if (challenge === 'TURN_RIGHT' && noseTip.x < baselineRef.current.nose.x - horizontalThreshold) challengeState.hasMoved = true;
+                if (challenge === 'TURN_LEFT' && noseTip.x > baselineRef.current.nose.x + horizontalThreshold) challengeState.hasMoved = true;
+                if (challenge === 'NOD' && noseTip.y > baselineRef.current.nose.y + verticalThreshold) challengeState.hasMoved = true;
+            }
+            else { // If has moved, check if it's returning
+                if (challenge === 'TURN_RIGHT' && noseTip.x > baselineRef.current.nose.x - (horizontalThreshold / 2)) livenessPassed = true;
+                if (challenge === 'TURN_LEFT' && noseTip.x < baselineRef.current.nose.x + (horizontalThreshold / 2)) livenessPassed = true;
+                if (challenge === 'NOD' && noseTip.y < baselineRef.current.nose.y + (verticalThreshold / 2)) livenessPassed = true;
+            }
+
 
             if (livenessPassed) {
                 setChallengeFeedback('success');
@@ -306,6 +280,7 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
 
 
     useEffect(() => {
+        let detectionIntervalId: number | null = null;
         if (areModelsLoaded && isVideoReady) {
             isFailureHandledRef.current = false;
             resetLivenessState(false);
@@ -326,19 +301,14 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                 }, 100);
             }
             
-            let lastDetectionTime = 0;
-            const detectionLoop = (currentTime: number) => {
-                if (currentTime - lastDetectionTime > DETECTION_INTERVAL) {
-                    lastDetectionTime = currentTime;
-                    runDetection();
-                }
-                detectionLoopRef.current = requestAnimationFrame(detectionLoop);
-            };
-            detectionLoopRef.current = requestAnimationFrame(detectionLoop);
+            detectionIntervalId = window.setInterval(() => {
+                 runDetection();
+            }, DETECTION_INTERVAL);
         }
         
         return () => {
             stopAllProcesses();
+            if(detectionIntervalId) clearInterval(detectionIntervalId);
         };
 
     }, [areModelsLoaded, isVideoReady, mode, runDetection, resetLivenessState, updateStatusText, handleFailure, stopAllProcesses]);
