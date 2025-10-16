@@ -11,17 +11,17 @@ interface HomePageProps {
   attendanceLog: AttendanceRecord[];
   onOpenDivisionModal: () => void;
   onNavigate: (page: Page) => void;
-  isFaceRegistered: boolean;
   isLoading: boolean;
   availableAttendanceRules: AturanAbsensi[];
   locationStatus: 'checking' | 'allowed' | 'denied' | 'out_of_range';
   attendanceRulesError: string | null;
+  isFaceRegistered: boolean;
 }
 
 // --- Icons ---
-const FaceScanIcon = (props: React.SVGProps<SVGSVGElement>) => (
+const FingerPrintIcon = (props: React.SVGProps<SVGSVGElement>) => (
     <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="currentColor" {...props}>
-      <path d="M12 2.25c-5.385 0-9.75 4.365-9.75 9.75s4.365 9.75 9.75 9.75 9.75-4.365 9.75-9.75S17.385 2.25 12 2.25ZM8.541 15.142a.75.75 0 0 1 0-1.061l1.173-1.172a.75.75 0 0 1 1.06 0l1.173 1.172a.75.75 0 0 1 0 1.061l-1.173 1.172a.75.75 0 0 1-1.06 0L8.54 15.142ZM14.25 10.5a.75.75 0 0 0 0 1.5h.008a.75.75 0 0 0 0-1.5H14.25ZM9.75 12a.75.75 0 0 1-.75-.75V9.75a.75.75 0 0 1 1.5 0v1.5a.75.75 0 0 1-.75.75Zm4.509 3.098a.75.75 0 0 1 .019 1.06l-1.172 1.172a.75.75 0 1 1-1.06-1.06l1.172-1.172a.75.75 0 0 1 1.041-.001Z" />
+      <path fillRule="evenodd" d="M8.25 6.75a3.75 3.75 0 1 1 7.5 0 3.75 3.75 0 0 1-7.5 0ZM15.75 9.75a3 3 0 1 1 6 0 3 3 0 0 1-6 0ZM4.5 9.75a3 3 0 1 1 6 0 3 3 0 0 1-6 0ZM15.75 15.75a3 3 0 1 1 6 0 3 3 0 0 1-6 0zM8.25 15.75a3.75 3.75 0 1 1 7.5 0 3.75 3.75 0 0 1-7.5 0zM4.5 15.75a3 3 0 1 1 6 0 3 3 0 0 1-6 0z" clipRule="evenodd" />
     </svg>
 );
 
@@ -87,8 +87,8 @@ const LocationStatusIndicator: React.FC<{ status: HomePageProps['locationStatus'
 
 const HomePage: React.FC<HomePageProps> = ({ 
     user, hasClockedInToday, attendanceLog, onOpenDivisionModal, onNavigate, 
-    isFaceRegistered, isLoading, availableAttendanceRules,
-    locationStatus, attendanceRulesError 
+    isLoading, availableAttendanceRules,
+    locationStatus, attendanceRulesError, isFaceRegistered
 }) => {
     
     const isLocationAllowed = locationStatus === 'allowed' && availableAttendanceRules.length > 0;
@@ -99,7 +99,7 @@ const HomePage: React.FC<HomePageProps> = ({
         if (locationStatus === 'checking') return "Mengecek Lokasi...";
         if (locationStatus === 'denied') return "Akses Lokasi Ditolak";
         if (locationStatus === 'out_of_range') return "Anda di Luar Jangkauan";
-        if (!isFaceRegistered) return "Daftarkan Wajah Dahulu";
+        if (!isFaceRegistered) return "Wajah Belum Terdaftar";
         if (isLocationAllowed) return "Absen Hari Ini";
         return "Tunggu..."; // Fallback for intermediate states
     };
@@ -132,11 +132,13 @@ const HomePage: React.FC<HomePageProps> = ({
                                     label={getButtonLabel()}
                                     onClick={onOpenDivisionModal}
                                     className={hasClockedInToday ? "bg-green-600" : "bg-sky-600 focus:ring-sky-500"}
-                                    Icon={FaceScanIcon}
-                                    disabled={!isFaceRegistered || hasClockedInToday || !isLocationAllowed || isLoading}
+                                    Icon={FingerPrintIcon}
+                                    disabled={hasClockedInToday || !isLocationAllowed || !isFaceRegistered || isLoading}
                                 />
-                                {!isFaceRegistered && <p className="text-xs text-red-500 mt-2">Daftarkan wajah Anda di menu Profil terlebih dahulu.</p>}
-                                {isFaceRegistered && !hasClockedInToday && locationStatus === 'out_of_range' && !isLoading &&
+                                {!hasClockedInToday && !isFaceRegistered && !isLoading && (
+                                     <p className="text-xs text-yellow-600 mt-2">Daftarkan wajah Anda di halaman Profil untuk absen.</p>
+                                )}
+                                {!hasClockedInToday && locationStatus === 'out_of_range' && !isLoading && isFaceRegistered &&
                                     <p className="text-xs text-yellow-600 mt-2">Tidak ada divisi yang tersedia untuk absen di lokasi Anda saat ini.</p>
                                 }
                             </div>

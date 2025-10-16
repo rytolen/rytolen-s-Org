@@ -23,6 +23,8 @@ export interface AturanAbsensi {
     radius_meter: number;
 }
 
+export type FaceDescriptor = Float32Array;
+
 export interface UserProfile {
   name: string;
   employeeId: string;
@@ -56,5 +58,3 @@ export interface SalarySlip {
   deductions: number;
   netSalary: number;
 }
-
-export type FaceDescriptor = Float32Array;

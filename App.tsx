@@ -4,14 +4,14 @@ import HistoryPage from './pages/HistoryPage';
 import LeavePage from './pages/LeavePage';
 import SalaryPage from './pages/SalaryPage';
 import ProfilePage from './pages/ProfilePage';
-import FaceScanner from './components/FaceScanner';
 import Toast from './components/Toast';
 import LoginPage from './pages/LoginPage';
 import DivisionSelectionModal from './components/DivisionSelectionModal';
 import InstallPwaPrompt from './components/InstallPwaPrompt';
+import FaceScanner from './components/FaceScanner';
 import { supabase } from './lib/supabase';
 
-import { AttendanceRecord, Page, UserProfile, LeaveRequest, LeaveStatus, SalarySlip, FaceDescriptor, AturanAbsensi } from './types';
+import { AttendanceRecord, Page, UserProfile, LeaveRequest, LeaveStatus, SalarySlip, AturanAbsensi, FaceDescriptor } from './types';
 import type { RealtimeChannel, PostgrestError } from '@supabase/supabase-js';
 
 // Mock Data for features not yet in DB
@@ -85,9 +85,6 @@ export const App: React.FC = () => {
     const [recentAttendanceLog, setRecentAttendanceLog] = useState<AttendanceRecord[]>([]);
     const [leaveRequests, setLeaveRequests] = useState<LeaveRequest[]>(MOCK_LEAVE_REQUESTS);
     
-    const [isScannerVisible, setScannerVisible] = useState(false);
-    const [scannerMode, setScannerMode] = useState<'register' | 'verify'>('verify');
-    const [userFaceDescriptor, setUserFaceDescriptor] = useState<FaceDescriptor | null>(null);
     const [toast, setToast] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
     
     // Geolocation and Division State
@@ -97,11 +94,17 @@ export const App: React.FC = () => {
     const [allAttendanceRules, setAllAttendanceRules] = useState<AturanAbsensi[]>([]);
     const [attendanceRulesError, setAttendanceRulesError] = useState<string | null>(null);
     const [isDivisionModalVisible, setDivisionModalVisible] = useState(false);
-    const [selectedRuleForAttendance, setSelectedRuleForAttendance] = useState<AturanAbsensi | null>(null);
     
     // PWA Install Prompt State
     const [installPromptEvent, setInstallPromptEvent] = useState<Event | null>(null);
     const [isInstallPromptVisible, setInstallPromptVisible] = useState(false);
+
+    // Face Scanner State
+    const [isFaceScannerVisible, setFaceScannerVisible] = useState(false);
+    const [faceScannerMode, setFaceScannerMode] = useState<'register' | 'verify'>('verify');
+    const [isFaceRegistered, setIsFaceRegistered] = useState(false);
+    const [faceDescriptor, setFaceDescriptor] = useState<FaceDescriptor | null>(null);
+    const attendanceRuleForVerificationRef = useRef<AturanAbsensi | null>(null);
 
     // --- PWA Install Logic ---
     useEffect(() => {
@@ -286,25 +289,8 @@ export const App: React.FC = () => {
             )
             .subscribe();
 
-
-        const faceDataChannel: RealtimeChannel = supabase
-             .channel(`public:wajah_karyawan:karyawan_id=eq.${currentUser.employeeId}`)
-            .on(
-                'postgres_changes',
-                { event: '*', schema: 'public', table: 'wajah_karyawan', filter: `karyawan_id=eq.${currentUser.employeeId}` },
-                (payload) => {
-                    if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-                        setUserFaceDescriptor(new Float32Array(payload.new.descriptor));
-                    } else if (payload.eventType === 'DELETE') {
-                        setUserFaceDescriptor(null);
-                    }
-                }
-            )
-            .subscribe();
-
         return () => {
             supabase.removeChannel(attendanceChannel);
-            supabase.removeChannel(faceDataChannel);
         };
 
     }, [currentUser, recentAttendanceLog]);
@@ -385,21 +371,26 @@ export const App: React.FC = () => {
                 }
             }
 
-            // Fetch face data
+             // Fetch face data
             const { data: faceData, error: faceError } = await supabase
                 .from('wajah_karyawan')
                 .select('descriptor')
                 .eq('karyawan_id', userId)
-                .limit(1);
-                
+                .maybeSingle();
+
             if (faceError) {
-                console.warn("Gagal memuat data wajah:", faceError.message);
-                setUserFaceDescriptor(null);
-            } else if (faceData && faceData.length > 0 && faceData[0].descriptor) {
-                setUserFaceDescriptor(new Float32Array(faceData[0].descriptor as any));
+                console.error("Gagal memuat data wajah:", faceError);
+                setIsFaceRegistered(false);
+                setFaceDescriptor(null);
+            } else if (faceData && faceData.descriptor) {
+                const descriptorArray = JSON.parse(faceData.descriptor);
+                setFaceDescriptor(new Float32Array(descriptorArray));
+                setIsFaceRegistered(true);
             } else {
-                setUserFaceDescriptor(null);
+                setIsFaceRegistered(false);
+                setFaceDescriptor(null);
             }
+
         } catch (error) {
             console.error("Terjadi error kritis saat memuat data:", error);
             setAttendanceRulesError("Gagal memuat semua data aplikasi.");
@@ -425,7 +416,6 @@ export const App: React.FC = () => {
         setCurrentUser(null);
         handleNavigate(Page.HOME);
         localStorage.removeItem('loggedInUserId');
-        setUserFaceDescriptor(null);
         setIsHomePageLoading(true);
         setCurrentLocation(null);
         setAvailableAttendanceRules([]);
@@ -459,44 +449,6 @@ export const App: React.FC = () => {
         showToast('Absen Masuk Berhasil!', 'success');
     }, [currentUser, showToast, currentLocation]);
     
-    const handleRegisterSuccess = async (descriptor: FaceDescriptor) => {
-        if (!currentUser) return;
-        
-        const descriptorArray = Array.from(descriptor);
-        
-        const { error } = await supabase
-            .from('wajah_karyawan')
-            .upsert({ 
-                karyawan_id: currentUser.employeeId, 
-                descriptor: descriptorArray 
-            }, { onConflict: 'karyawan_id' });
-
-        if (error) {
-            console.error('Error saving face data:', error);
-            setScannerVisible(false);
-            showToast('Gagal menyimpan data wajah!', 'error');
-            return;
-        }
-        
-        setScannerVisible(false);
-        showToast('Wajah berhasil didaftarkan!', 'success');
-    };
-
-    const openScanner = (mode: 'register' | 'verify') => {
-        setScannerMode(mode);
-        setScannerVisible(true);
-    };
-
-    const handleVerifySuccess = () => {
-        setScannerVisible(false);
-        handleAttendance(selectedRuleForAttendance);
-    };
-
-    const handleVerifyFailure = (error: string) => {
-        setScannerVisible(false);
-        showToast(error, 'error');
-    };
-
     const handleOpenDivisionModal = () => {
         if (availableAttendanceRules.length > 0) {
             setDivisionModalVisible(true);
@@ -504,11 +456,45 @@ export const App: React.FC = () => {
     };
 
     const handleRuleSelected = (rule: AturanAbsensi) => {
-        setSelectedRuleForAttendance(rule);
         setDivisionModalVisible(false);
-        openScanner('verify');
+        attendanceRuleForVerificationRef.current = rule;
+        setFaceScannerMode('verify');
+        setFaceScannerVisible(true);
     };
 
+    const handleFaceVerificationSuccess = () => {
+        setFaceScannerVisible(false);
+        handleAttendance(attendanceRuleForVerificationRef.current);
+        attendanceRuleForVerificationRef.current = null;
+    };
+
+    const handleRegisterFace = async (descriptor: FaceDescriptor) => {
+        if (!currentUser) return;
+        setFaceScannerVisible(false);
+
+        const descriptorArray = Array.from(descriptor);
+        
+        const { error } = await supabase
+            .from('wajah_karyawan')
+            .upsert({ 
+                karyawan_id: currentUser.employeeId, 
+                descriptor: JSON.stringify(descriptorArray)
+            }, { onConflict: 'karyawan_id' });
+
+        if (error) {
+            console.error('Gagal menyimpan data wajah:', error);
+            showToast('Gagal menyimpan data wajah.', 'error');
+        } else {
+            setFaceDescriptor(descriptor);
+            setIsFaceRegistered(true);
+            showToast('Pendaftaran wajah berhasil!', 'success');
+        }
+    };
+    
+    const handleOpenFaceRegistration = () => {
+        setFaceScannerMode('register');
+        setFaceScannerVisible(true);
+    };
 
     const handleAddLeaveRequest = (request: Omit<LeaveRequest, 'id' | 'status'>) => {
         const newRequest: LeaveRequest = { ...request, id: `L${Date.now()}`, status: LeaveStatus.PENDING };
@@ -536,11 +522,11 @@ export const App: React.FC = () => {
                     attendanceLog={recentAttendanceLog}
                     onOpenDivisionModal={handleOpenDivisionModal}
                     onNavigate={handleNavigate}
-                    isFaceRegistered={!!userFaceDescriptor}
                     isLoading={isHomePageLoading}
                     availableAttendanceRules={availableAttendanceRules}
                     locationStatus={locationStatus}
                     attendanceRulesError={attendanceRulesError}
+                    isFaceRegistered={isFaceRegistered}
                 />;
             case Page.HISTORY:
                 return <HistoryPage user={currentUser} onBack={onBack} />;
@@ -549,7 +535,13 @@ export const App: React.FC = () => {
             case Page.SALARY:
                 return <SalaryPage slips={MOCK_SALARY_SLIPS} onBack={onBack} />;
             case Page.PROFILE:
-                return <ProfilePage user={currentUser} onBack={onBack} isFaceRegistered={!!userFaceDescriptor} onRegisterFace={() => openScanner('register')} onLogout={handleLogout} />;
+                return <ProfilePage 
+                  user={currentUser} 
+                  onBack={onBack} 
+                  onLogout={handleLogout}
+                  onRegisterFace={handleOpenFaceRegistration}
+                  isFaceRegistered={isFaceRegistered}
+                />;
             default:
                  return <HomePage
                     user={currentUser}
@@ -557,11 +549,11 @@ export const App: React.FC = () => {
                     attendanceLog={recentAttendanceLog}
                     onOpenDivisionModal={handleOpenDivisionModal}
                     onNavigate={handleNavigate}
-                    isFaceRegistered={!!userFaceDescriptor}
                     isLoading={isHomePageLoading}
                     availableAttendanceRules={availableAttendanceRules}
                     locationStatus={locationStatus}
                     attendanceRulesError={attendanceRulesError}
+                    isFaceRegistered={isFaceRegistered}
                 />;
         }
     };
@@ -572,6 +564,21 @@ export const App: React.FC = () => {
                 {renderPage()}
             </main>
 
+            {isFaceScannerVisible && (
+                <FaceScanner 
+                    mode={faceScannerMode}
+                    onSuccess={(descriptor) => {
+                        if (faceScannerMode === 'register' && descriptor) {
+                            handleRegisterFace(descriptor);
+                        } else {
+                            handleFaceVerificationSuccess();
+                        }
+                    }}
+                    onCancel={() => setFaceScannerVisible(false)}
+                    registeredDescriptor={faceDescriptor}
+                />
+            )}
+
             {isInstallPromptVisible && installPromptEvent && (
                 <InstallPwaPrompt onInstall={handleInstall} onDismiss={handleDismissInstall} />
             )}
@@ -581,17 +588,6 @@ export const App: React.FC = () => {
                     rules={availableAttendanceRules}
                     onSelect={handleRuleSelected}
                     onClose={() => setDivisionModalVisible(false)}
-                />
-            )}
-
-            {isScannerVisible && (
-                <FaceScanner
-                    mode={scannerMode}
-                    onClose={() => setScannerVisible(false)}
-                    onRegisterSuccess={handleRegisterSuccess}
-                    onVerifySuccess={handleVerifySuccess}
-                    onVerifyFailure={handleVerifyFailure}
-                    registeredDescriptor={userFaceDescriptor}
                 />
             )}
 

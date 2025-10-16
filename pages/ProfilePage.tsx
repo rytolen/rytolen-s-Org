@@ -4,9 +4,9 @@ import { UserProfile } from '../types';
 interface ProfilePageProps {
   user: UserProfile;
   onBack: () => void;
-  isFaceRegistered: boolean;
-  onRegisterFace: () => void;
   onLogout: () => void;
+  onRegisterFace: () => void;
+  isFaceRegistered: boolean;
 }
 
 const InfoRow: React.FC<{ label: string; value: string; icon: React.ReactNode }> = ({ label, value, icon }) => (
@@ -19,7 +19,7 @@ const InfoRow: React.FC<{ label: string; value: string; icon: React.ReactNode }>
     </div>
 );
 
-const ProfilePage: React.FC<ProfilePageProps> = ({ user, onBack, isFaceRegistered, onRegisterFace, onLogout }) => {
+const ProfilePage: React.FC<ProfilePageProps> = ({ user, onBack, onLogout, onRegisterFace, isFaceRegistered }) => {
 
     const formatDate = (dateString: string) => {
         return new Date(dateString).toLocaleDateString('id-ID', { day: 'numeric', month: 'long', year: 'numeric' });
@@ -58,15 +58,12 @@ const ProfilePage: React.FC<ProfilePageProps> = ({ user, onBack, isFaceRegistere
           </div>
 
           <div className="p-6 mt-2 space-y-4">
-              <button 
+               <button 
                 onClick={onRegisterFace}
-                disabled={isFaceRegistered}
-                className="w-full flex items-center justify-center gap-3 py-3 px-6 rounded-xl text-sky-600 bg-sky-100 font-bold text-md transform transition-all duration-150 ease-in-out enabled:hover:bg-sky-200 enabled:active:scale-95 disabled:opacity-60 disabled:cursor-not-allowed"
+                className={`w-full flex items-center justify-center gap-3 py-3 px-6 rounded-xl font-bold text-md transform transition-all duration-150 ease-in-out active:scale-95 ${isFaceRegistered ? 'bg-green-100 text-green-700 hover:bg-green-200' : 'bg-sky-100 text-sky-700 hover:bg-sky-200'}`}
                 >
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor" strokeWidth={2}>
-                  <path strokeLinecap="round" strokeLinejoin="round" d="M12 4.5v15m7.5-7.5h-15" />
-                </svg>
-                {isFaceRegistered ? 'Wajah Terdaftar' : 'Daftar Wajah'}
+                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 9a3 3 0 100-6 3 3 0 000 6zm-7 9a7 7 0 1114 0H3z" clipRule="evenodd" /></svg>
+                {isFaceRegistered ? 'Daftar Ulang Wajah' : 'Daftar Wajah'}
                </button>
 
                <button 
