@@ -14,7 +14,7 @@ interface FaceScannerProps {
 
 // --- Constants ---
 const LIVENESS_TIMEOUT = 25000;
-const DETECTION_INTERVAL = 150; 
+const DETECTION_INTERVAL = 200; // Adjusted for better mobile performance
 const FACE_MATCH_DISTANCE = 0.45;
 const NUM_CHALLENGES = 2;
 
@@ -22,7 +22,7 @@ const NUM_CHALLENGES = 2;
 const TURN_THRESHOLD_PERCENT = 0.16;
 const NOD_THRESHOLD_PERCENT = 0.07;
 const RETURN_THRESHOLD_MULTIPLIER = 0.5;
-const NO_FACE_WARNING_THRESHOLD = 15; // ~2.25 seconds
+const NO_FACE_WARNING_THRESHOLD = 15; // ~3 seconds with 200ms interval
 
 // --- State Machine ---
 type ChallengeType = 'TURN_LEFT' | 'TURN_RIGHT' | 'NOD';
@@ -103,7 +103,7 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
         canvas.height = video.videoHeight;
         ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
 
-        const detectorOptions = new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.5 });
+        const detectorOptions = new faceapi.TinyFaceDetectorOptions({ inputSize: 128, scoreThreshold: 0.5 }); // Optimized for mobile
         const detection = await faceapi.detectSingleFace(canvas, detectorOptions)
             .withFaceLandmarks()
             .withFaceDescriptor();
