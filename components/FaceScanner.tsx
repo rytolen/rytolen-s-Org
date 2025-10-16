@@ -215,13 +215,6 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
 
             const horizontalThreshold = baselineRef.current.faceWidth * TURN_THRESHOLD_PERCENT;
             const verticalThreshold = baselineRef.current.faceWidth * NOD_THRESHOLD_PERCENT;
-
-            const isCentered = Math.abs(noseTip.x - baselineRef.current.nose.x) < horizontalThreshold / 3;
-            if (isCentered && !challengeState.hasMoved) {
-                const SMOOTHING_FACTOR = 0.5;
-                baselineRef.current.nose.x = (SMOOTHING_FACTOR * baselineRef.current.nose.x) + ((1 - SMOOTHING_FACTOR) * noseTip.x);
-                baselineRef.current.nose.y = (SMOOTHING_FACTOR * baselineRef.current.nose.y) + ((1 - SMOOTHING_FACTOR) * noseTip.y);
-            }
             
             if (!challengeState.hasMoved) {
                 if (challenge === 'TURN_RIGHT' && noseTip.x < baselineRef.current.nose.x - horizontalThreshold) challengeState.hasMoved = true;
