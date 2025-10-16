@@ -16,19 +16,20 @@ interface FaceScannerProps {
 const LIVENESS_TIMEOUT = 25000;
 const DETECTION_INTERVAL = 150; 
 const FACE_MATCH_DISTANCE = 0.45;
+const NUM_CHALLENGES = 2;
+const REQUIRED_CONSECUTIVE_FRAMES = 3; // Key to ignoring jitter
 
 // --- Liveness Detection Constants ---
-const NO_FACE_RESET_THRESHOLD = 10;
-const STABLE_FACE_FRAMES_REQUIRED = 4;
 const TURN_THRESHOLD_PERCENT = 0.16;
 const NOD_THRESHOLD_PERCENT = 0.07;
-const NUM_CHALLENGES = 2;
+const NO_FACE_RESET_THRESHOLD = 10;
 
 // --- State Machine ---
 type ChallengeType = 'TURN_LEFT' | 'TURN_RIGHT' | 'NOD';
 const ALL_CHALLENGES: ChallengeType[] = ['TURN_LEFT', 'TURN_RIGHT', 'NOD'];
 
 type DetectionState = 'INITIALIZING' | 'WAITING_FOR_FACE' | 'CAPTURING_BASELINE' | 'AWAITING_CHALLENGE' | 'CHALLENGE_TRANSITION' | 'PROCESSING';
+type ChallengePhase = 'waiting_for_move' | 'waiting_for_return';
 
 const getChallengeInstruction = (challenge: ChallengeType | null): string => {
     if (!challenge) return 'Tahan posisi, melihat ke depan.';
@@ -42,7 +43,6 @@ const getChallengeInstruction = (challenge: ChallengeType | null): string => {
 const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVerifySuccess, onVerifyFailure, registeredDescriptor, onClose }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
     const canvasRef = useRef<HTMLCanvasElement>(null); 
-    const statusTextRef = useRef('Memuat model AI...');
     const [statusText, setStatusText] = useState('Memuat model AI...');
     const [error, setError] = useState<string | null>(null);
     
@@ -51,7 +51,7 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
     const [progress, setProgress] = useState(100);
     const [challengeFeedback, setChallengeFeedback] = useState<'success' | null>(null);
 
-    const detectionLoopRef = useRef<number | null>(null);
+    const detectionIntervalRef = useRef<number | null>(null);
     const timeoutRef = useRef<number | null>(null);
     const progressIntervalRef = useRef<number | null>(null);
 
@@ -59,31 +59,30 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
     const detectionStateRef = useRef<DetectionState>('INITIALIZING');
     const challengeSequenceRef = useRef<ChallengeType[]>([]);
     const challengeStepRef = useRef<number>(0);
-
-    const consecutiveFaceFramesRef = useRef<number>(0);
     const consecutiveNoFaceFramesRef = useRef<number>(0);
     const baselineRef = useRef<{ nose: {x: number, y: number}; faceWidth: number; } | null>(null);
-    const challengeStateRef = useRef({ hasMoved: false });
     const isFailureHandledRef = useRef(false);
 
-    const updateStatusText = useCallback((newText: string, forceUpdate = false) => {
-        if (statusTextRef.current !== newText || forceUpdate) {
-            statusTextRef.current = newText;
-            setStatusText(newText);
-        }
+    // REWRITTEN Liveness State Refs
+    const challengePhaseRef = useRef<ChallengePhase>('waiting_for_move');
+    const consecutiveActionFramesRef = useRef<number>(0);
+
+
+    const updateStatusText = useCallback((newText: string) => {
+        setStatusText(newText);
     }, []);
 
     const stopAllProcesses = useCallback(() => {
-        if (detectionLoopRef.current) cancelAnimationFrame(detectionLoopRef.current);
+        if (detectionIntervalRef.current) clearInterval(detectionIntervalRef.current);
         if (timeoutRef.current) clearTimeout(timeoutRef.current);
         if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
-        detectionLoopRef.current = null;
+        detectionIntervalRef.current = null;
         timeoutRef.current = null;
         progressIntervalRef.current = null;
     }, []);
 
     const handleFailure = useCallback((errorMsg: string) => {
-        if (isFailureHandledRef.current) return; // Prevent multiple failure calls
+        if (isFailureHandledRef.current) return;
         isFailureHandledRef.current = true;
         stopAllProcesses();
         onVerifyFailure(errorMsg);
@@ -93,13 +92,16 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
         if(resetText) updateStatusText('Posisikan wajah Anda di tengah.');
         detectionStateRef.current = 'WAITING_FOR_FACE';
         baselineRef.current = null;
-        challengeStateRef.current = { hasMoved: false };
         challengeSequenceRef.current = [];
         challengeStepRef.current = 0;
+        challengePhaseRef.current = 'waiting_for_move';
+        consecutiveActionFramesRef.current = 0;
     }, [updateStatusText]);
 
     const runDetection = useCallback(async () => {
-        if (!videoRef.current || !canvasRef.current || videoRef.current.paused || videoRef.current.ended || !faceapi || detectionStateRef.current === 'PROCESSING' || detectionStateRef.current === 'CHALLENGE_TRANSITION') return;
+        if (!videoRef.current || !canvasRef.current || videoRef.current.paused || videoRef.current.ended || !faceapi || ['PROCESSING', 'CHALLENGE_TRANSITION'].includes(detectionStateRef.current)) {
+            return;
+        }
         
         const canvas = canvasRef.current;
         const video = videoRef.current;
@@ -117,12 +119,8 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
 
         if (!detection) {
             consecutiveNoFaceFramesRef.current++;
-            consecutiveFaceFramesRef.current = 0; 
-            if (consecutiveNoFaceFramesRef.current >= NO_FACE_RESET_THRESHOLD) {
-                const currentState = detectionStateRef.current;
-                if (currentState === 'CAPTURING_BASELINE' || currentState === 'AWAITING_CHALLENGE') {
-                    resetLivenessState();
-                }
+            if (consecutiveNoFaceFramesRef.current >= NO_FACE_RESET_THRESHOLD && ['CAPTURING_BASELINE', 'AWAITING_CHALLENGE'].includes(detectionStateRef.current)) {
+                resetLivenessState();
             }
             return;
         }
@@ -140,11 +138,8 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
         }
 
         if (currentState === 'WAITING_FOR_FACE') {
-            consecutiveFaceFramesRef.current++;
-            if (consecutiveFaceFramesRef.current >= STABLE_FACE_FRAMES_REQUIRED) {
-                detectionStateRef.current = 'CAPTURING_BASELINE';
-                updateStatusText('Tahan posisi, melihat ke depan.');
-            }
+            updateStatusText('Tahan posisi, melihat ke depan.');
+            detectionStateRef.current = 'CAPTURING_BASELINE';
         } else if (currentState === 'CAPTURING_BASELINE') {
             baselineRef.current = {
                 nose: { x: noseTip.x, y: noseTip.y },
@@ -156,86 +151,99 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                 let availableChallenges = [...ALL_CHALLENGES];
                 for (let i = 0; i < NUM_CHALLENGES; i++) {
                     const randomIndex = Math.floor(Math.random() * availableChallenges.length);
-                    const challenge = availableChallenges.splice(randomIndex, 1)[0];
-                    sequence.push(challenge);
+                    sequence.push(availableChallenges.splice(randomIndex, 1)[0]);
                 }
                 challengeSequenceRef.current = sequence;
-                challengeStepRef.current = 0;
             }
             
             detectionStateRef.current = 'AWAITING_CHALLENGE';
-
             const firstChallenge = challengeSequenceRef.current[0];
             updateStatusText(getChallengeInstruction(firstChallenge));
         
         } else if (currentState === 'AWAITING_CHALLENGE') {
-            if (!baselineRef.current || challengeSequenceRef.current.length === 0) return;
-            
-            let livenessPassed = false;
+            const baseline = baselineRef.current;
+            if (!baseline) return resetLivenessState();
+
             const currentStep = challengeStepRef.current;
             const challenge = challengeSequenceRef.current[currentStep];
-            const challengeState = challengeStateRef.current;
+            const phase = challengePhaseRef.current;
 
-            const horizontalThreshold = baselineRef.current.faceWidth * TURN_THRESHOLD_PERCENT;
-            const verticalThreshold = baselineRef.current.faceWidth * NOD_THRESHOLD_PERCENT;
-            
-            if (!challengeState.hasMoved) {
-                 // The baseline is now stable for the duration of the challenge.
-                 // We don't update it here anymore.
-            } else {
-                if (challenge === 'TURN_RIGHT' && noseTip.x > baselineRef.current.nose.x - (horizontalThreshold / 2)) livenessPassed = true;
-                if (challenge === 'TURN_LEFT' && noseTip.x < baselineRef.current.nose.x + (horizontalThreshold / 2)) livenessPassed = true;
-                if (challenge === 'NOD' && noseTip.y < baselineRef.current.nose.y + (verticalThreshold / 2)) livenessPassed = true;
-            }
-            
-            // This logic was flawed. It should detect movement AWAY from baseline, then movement back.
-            if (!challengeState.hasMoved) {
-                if (challenge === 'TURN_RIGHT' && noseTip.x < baselineRef.current.nose.x - horizontalThreshold) challengeState.hasMoved = true;
-                if (challenge === 'TURN_LEFT' && noseTip.x > baselineRef.current.nose.x + horizontalThreshold) challengeState.hasMoved = true;
-                if (challenge === 'NOD' && noseTip.y > baselineRef.current.nose.y + verticalThreshold) challengeState.hasMoved = true;
-            }
-            else { // If has moved, check if it's returning
-                if (challenge === 'TURN_RIGHT' && noseTip.x > baselineRef.current.nose.x - (horizontalThreshold / 2)) livenessPassed = true;
-                if (challenge === 'TURN_LEFT' && noseTip.x < baselineRef.current.nose.x + (horizontalThreshold / 2)) livenessPassed = true;
-                if (challenge === 'NOD' && noseTip.y < baselineRef.current.nose.y + (verticalThreshold / 2)) livenessPassed = true;
-            }
+            const horizontalThreshold = baseline.faceWidth * TURN_THRESHOLD_PERCENT;
+            const verticalThreshold = baseline.faceWidth * NOD_THRESHOLD_PERCENT;
 
+            const isPastThreshold = () => {
+                switch (challenge) {
+                    case 'TURN_RIGHT': return noseTip.x < baseline.nose.x - horizontalThreshold;
+                    case 'TURN_LEFT': return noseTip.x > baseline.nose.x + horizontalThreshold;
+                    case 'NOD': return noseTip.y > baseline.nose.y + verticalThreshold;
+                    default: return false;
+                }
+            };
 
-            if (livenessPassed) {
-                setChallengeFeedback('success');
-                setTimeout(() => setChallengeFeedback(null), 500);
+            const isNearBaseline = () => {
+                const returnThreshold = 0.5; // Must return at least halfway
+                const dx = Math.abs(noseTip.x - baseline.nose.x);
+                const dy = Math.abs(noseTip.y - baseline.nose.y);
+                if (challenge === 'TURN_LEFT' || challenge === 'TURN_RIGHT') return dx < horizontalThreshold * returnThreshold;
+                if (challenge === 'NOD') return dy < verticalThreshold * returnThreshold;
+                return false;
+            };
 
-                const nextStep = currentStep + 1;
-                if (nextStep >= NUM_CHALLENGES) {
-                    detectionStateRef.current = 'PROCESSING';
-                    stopAllProcesses();
-                    updateStatusText('Memproses verifikasi...');
-                    
-                    if (!registeredDescriptor) return handleFailure('Data wajah terdaftar tidak ditemukan.');
-                    
-                    const faceMatcher = new faceapi.FaceMatcher([registeredDescriptor]);
-                    const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
-                    
-                    if (bestMatch.label !== 'unknown' && bestMatch.distance < FACE_MATCH_DISTANCE) {
-                        onVerifySuccess();
-                    } else {
-                        handleFailure('Verifikasi wajah gagal. Wajah tidak cocok.');
-                    }
+            if (phase === 'waiting_for_move') {
+                if (isPastThreshold()) {
+                    consecutiveActionFramesRef.current++;
                 } else {
-                    detectionStateRef.current = 'CHALLENGE_TRANSITION';
-                    challengeStepRef.current = nextStep;
-                    updateStatusText('Bagus! Kembali ke posisi tengah...');
-                    
-                    setTimeout(() => {
-                        baselineRef.current = {
-                            nose: { x: noseTip.x, y: noseTip.y },
-                            faceWidth: detection.detection.box.width,
-                        };
-                        challengeStateRef.current = { hasMoved: false };
-                        const nextChallenge = challengeSequenceRef.current[nextStep];
-                        updateStatusText(getChallengeInstruction(nextChallenge));
-                        detectionStateRef.current = 'AWAITING_CHALLENGE';
-                    }, 250);
+                    consecutiveActionFramesRef.current = 0;
+                }
+
+                if (consecutiveActionFramesRef.current >= REQUIRED_CONSECUTIVE_FRAMES) {
+                    challengePhaseRef.current = 'waiting_for_return';
+                    consecutiveActionFramesRef.current = 0;
+                }
+            } else if (phase === 'waiting_for_return') {
+                if (isNearBaseline()) {
+                    consecutiveActionFramesRef.current++;
+                } else {
+                    consecutiveActionFramesRef.current = 0;
+                }
+
+                if (consecutiveActionFramesRef.current >= REQUIRED_CONSECUTIVE_FRAMES) {
+                    // --- CHALLENGE PASSED ---
+                    setChallengeFeedback('success');
+                    setTimeout(() => setChallengeFeedback(null), 500);
+
+                    const nextStep = currentStep + 1;
+                    if (nextStep >= NUM_CHALLENGES) {
+                        detectionStateRef.current = 'PROCESSING';
+                        stopAllProcesses();
+                        updateStatusText('Memproses verifikasi...');
+                        
+                        if (!registeredDescriptor) return handleFailure('Data wajah terdaftar tidak ditemukan.');
+                        const faceMatcher = new faceapi.FaceMatcher([registeredDescriptor]);
+                        const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
+                        
+                        if (bestMatch.label !== 'unknown' && bestMatch.distance < FACE_MATCH_DISTANCE) {
+                            onVerifySuccess();
+                        } else {
+                            handleFailure('Verifikasi wajah gagal. Wajah tidak cocok.');
+                        }
+                    } else {
+                        detectionStateRef.current = 'CHALLENGE_TRANSITION';
+                        challengeStepRef.current = nextStep;
+                        updateStatusText('Bagus! Kembali ke posisi tengah...');
+                        
+                        setTimeout(() => {
+                            challengePhaseRef.current = 'waiting_for_move';
+                            consecutiveActionFramesRef.current = 0;
+                            baselineRef.current = {
+                                nose: { x: noseTip.x, y: noseTip.y },
+                                faceWidth: detection.detection.box.width,
+                            };
+                            const nextChallenge = challengeSequenceRef.current[nextStep];
+                            updateStatusText(getChallengeInstruction(nextChallenge));
+                            detectionStateRef.current = 'AWAITING_CHALLENGE';
+                        }, 750);
+                    }
                 }
             }
         }
@@ -253,12 +261,9 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                     ]);
                 }
                 setAreModelsLoaded(true);
-
                 updateStatusText('Mengaktifkan kamera...');
                 const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
-                if (videoRef.current) {
-                    videoRef.current.srcObject = stream;
-                }
+                if (videoRef.current) videoRef.current.srcObject = stream;
             } catch (err) {
                 console.error("Setup failed:", err);
                 const errorMessage = (err as Error).name === 'NotAllowedError' 
@@ -269,10 +274,9 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
             }
         };
         setup();
-
         return () => {
             stopAllProcesses();
-            if (videoRef.current && videoRef.current.srcObject) {
+            if (videoRef.current?.srcObject) {
                 (videoRef.current.srcObject as MediaStream).getTracks().forEach(track => track.stop());
             }
         };
@@ -280,36 +284,24 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
 
 
     useEffect(() => {
-        let detectionIntervalId: number | null = null;
         if (areModelsLoaded && isVideoReady) {
             isFailureHandledRef.current = false;
             resetLivenessState(false);
             updateStatusText('Posisikan wajah Anda di tengah.');
 
             if (mode === 'verify') {
-                timeoutRef.current = window.setTimeout(() => {
-                    if (detectionStateRef.current !== 'PROCESSING') {
-                        handleFailure('Verifikasi gagal: Waktu habis.');
-                    }
-                }, LIVENESS_TIMEOUT);
-
+                timeoutRef.current = window.setTimeout(() => handleFailure('Verifikasi gagal: Waktu habis.'), LIVENESS_TIMEOUT);
                 const startTime = Date.now();
                 progressIntervalRef.current = window.setInterval(() => {
-                    const elapsedTime = Date.now() - startTime;
-                    const remainingTime = Math.max(0, LIVENESS_TIMEOUT - elapsedTime);
+                    const remainingTime = Math.max(0, LIVENESS_TIMEOUT - (Date.now() - startTime));
                     setProgress((remainingTime / LIVENESS_TIMEOUT) * 100);
                 }, 100);
             }
             
-            detectionIntervalId = window.setInterval(() => {
-                 runDetection();
-            }, DETECTION_INTERVAL);
+            detectionIntervalRef.current = window.setInterval(runDetection, DETECTION_INTERVAL);
         }
         
-        return () => {
-            stopAllProcesses();
-            if(detectionIntervalId) clearInterval(detectionIntervalId);
-        };
+        return () => stopAllProcesses();
 
     }, [areModelsLoaded, isVideoReady, mode, runDetection, resetLivenessState, updateStatusText, handleFailure, stopAllProcesses]);
 
@@ -332,23 +324,15 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                         <svg className="w-full h-full" viewBox="0 0 100 100">
                             <circle
                                 className="text-slate-700/50"
-                                strokeWidth="4"
-                                stroke="currentColor"
-                                fill="transparent"
-                                r="48"
-                                cx="50"
-                                cy="50"
+                                strokeWidth="4" stroke="currentColor" fill="transparent"
+                                r="48" cx="50" cy="50"
                             />
                             <circle
                                 className={`transition-all duration-300 ease-linear ${
                                     challengeFeedback === 'success' ? 'text-green-500' : 'text-sky-500'
                                 }`}
-                                strokeWidth="4"
-                                stroke="currentColor"
-                                fill="transparent"
-                                r="48"
-                                cx="50"
-                                cy="50"
+                                strokeWidth="4" stroke="currentColor" fill="transparent"
+                                r="48" cx="50" cy="50"
                                 strokeDasharray={2 * Math.PI * 48}
                                 strokeDashoffset={(2 * Math.PI * 48) - (progress / 100) * (2 * Math.PI * 48)}
                                 strokeLinecap="round"
