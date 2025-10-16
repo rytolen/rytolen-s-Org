@@ -13,16 +13,20 @@ interface FaceScannerProps {
 }
 
 // --- Constants ---
-const LIVENESS_TIMEOUT = 35000; 
-const DETECTION_INTERVAL = 100;
+const LIVENESS_TIMEOUT = 25000;
+const DETECTION_INTERVAL = 150; 
 const FACE_MATCH_DISTANCE = 0.45;
 
 // --- Liveness Detection Constants ---
 const NO_FACE_RESET_THRESHOLD = 10;
-const STABLE_FACE_FRAMES_REQUIRED = 5; 
-const TURN_THRESHOLD_PERCENT = 0.18; 
-const NOD_THRESHOLD_PERCENT = 0.08; 
-const NUM_CHALLENGES = 3; 
+const STABLE_FACE_FRAMES_REQUIRED = 4;
+const TURN_THRESHOLD_PERCENT = 0.16;
+const NOD_THRESHOLD_PERCENT = 0.07;
+const NUM_CHALLENGES = 2;
+
+// --- Low Light Enhancement Constants ---
+const LOW_LIGHT_THRESHOLD = 70; // Average pixel brightness (0-255) to trigger enhancement
+const BRIGHTNESS_FILTER = 'brightness(1.5) contrast(1.2)';
 
 // --- State Machine ---
 type ChallengeType = 'TURN_LEFT' | 'TURN_RIGHT' | 'NOD';
@@ -41,14 +45,17 @@ const getChallengeInstruction = (challenge: ChallengeType | null): string => {
 
 const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVerifySuccess, onVerifyFailure, registeredDescriptor, onClose }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
+    const canvasRef = useRef<HTMLCanvasElement>(null); // Canvas for pre-processing
+    const statusTextRef = useRef('Memuat model AI...');
     const [statusText, setStatusText] = useState('Memuat model AI...');
     const [error, setError] = useState<string | null>(null);
     
     const [areModelsLoaded, setAreModelsLoaded] = useState(false);
     const [isVideoReady, setIsVideoReady] = useState(false);
     const [progress, setProgress] = useState(100);
+    const [challengeFeedback, setChallengeFeedback] = useState<'success' | null>(null);
 
-    const intervalRef = useRef<number | null>(null);
+    const detectionLoopRef = useRef<number | null>(null);
     const timeoutRef = useRef<number | null>(null);
     const progressIntervalRef = useRef<number | null>(null);
 
@@ -61,26 +68,87 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
     const consecutiveNoFaceFramesRef = useRef<number>(0);
     const baselineRef = useRef<{ nose: {x: number, y: number}; faceWidth: number; } | null>(null);
     const challengeStateRef = useRef({ hasMoved: false });
+    const isFailureHandledRef = useRef(false);
+    const isLowLightRef = useRef(false);
+
+    const updateStatusText = useCallback((newText: string, forceUpdate = false) => {
+        if (statusTextRef.current !== newText || forceUpdate) {
+            statusTextRef.current = newText;
+            setStatusText(newText);
+        }
+    }, []);
 
     const stopAllProcesses = useCallback(() => {
-        if (intervalRef.current) clearInterval(intervalRef.current);
+        if (detectionLoopRef.current) cancelAnimationFrame(detectionLoopRef.current);
         if (timeoutRef.current) clearTimeout(timeoutRef.current);
         if (progressIntervalRef.current) clearInterval(progressIntervalRef.current);
+        detectionLoopRef.current = null;
+        timeoutRef.current = null;
+        progressIntervalRef.current = null;
     }, []);
+
+    const handleFailure = useCallback((errorMsg: string) => {
+        if (isFailureHandledRef.current) return; // Prevent multiple failure calls
+        isFailureHandledRef.current = true;
+        stopAllProcesses();
+        onVerifyFailure(errorMsg);
+    }, [onVerifyFailure, stopAllProcesses]);
     
-    const resetLivenessState = (resetText = true) => {
-        if(resetText) setStatusText('Posisikan wajah Anda di tengah.');
+    const resetLivenessState = useCallback((resetText = true) => {
+        if(resetText) updateStatusText('Posisikan wajah Anda di tengah.');
         detectionStateRef.current = 'WAITING_FOR_FACE';
         baselineRef.current = null;
         challengeStateRef.current = { hasMoved: false };
         challengeSequenceRef.current = [];
         challengeStepRef.current = 0;
-    }
+    }, [updateStatusText]);
 
     const runDetection = useCallback(async () => {
-        if (!videoRef.current || videoRef.current.paused || videoRef.current.ended || !faceapi || detectionStateRef.current === 'PROCESSING' || detectionStateRef.current === 'CHALLENGE_TRANSITION') return;
+        if (!videoRef.current || !canvasRef.current || videoRef.current.paused || videoRef.current.ended || !faceapi || detectionStateRef.current === 'PROCESSING' || detectionStateRef.current === 'CHALLENGE_TRANSITION') return;
+        
+        const canvas = canvasRef.current;
+        const video = videoRef.current;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+        
+        // Match canvas size to video element size for correct drawing
+        canvas.width = video.videoWidth;
+        canvas.height = video.videoHeight;
 
-        const detection = await faceapi.detectSingleFace(videoRef.current, new faceapi.TinyFaceDetectorOptions({ scoreThreshold: 0.5 }))
+        // --- Low Light Detection & Enhancement ---
+        ctx.filter = 'none'; // Reset filter
+        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+        
+        const imageData = ctx.getImageData(0, 0, canvas.width, canvas.height);
+        const data = imageData.data;
+        let brightnessSum = 0;
+        // Sample pixels for performance instead of checking all of them
+        const sampleRate = 10; 
+        for (let i = 0; i < data.length; i += 4 * sampleRate) {
+            const r = data[i];
+            const g = data[i + 1];
+            const b = data[i + 2];
+            brightnessSum += (r + g + b) / 3;
+        }
+        const avgBrightness = brightnessSum / (data.length / (4 * sampleRate));
+        
+        const wasLowLight = isLowLightRef.current;
+        isLowLightRef.current = avgBrightness < LOW_LIGHT_THRESHOLD;
+
+        if (isLowLightRef.current) {
+            ctx.filter = BRIGHTNESS_FILTER;
+            ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+             if (!wasLowLight && detectionStateRef.current !== 'PROCESSING') {
+                updateStatusText("Cahaya redup, mencoba meningkatkan gambar...", true);
+            }
+        } else {
+            if (wasLowLight && detectionStateRef.current !== 'PROCESSING') {
+                updateStatusText(getChallengeInstruction(challengeSequenceRef.current[challengeStepRef.current] || null), true);
+            }
+        }
+
+        const detectorOptions = new faceapi.TinyFaceDetectorOptions({ inputSize: 160, scoreThreshold: 0.5 });
+        const detection = await faceapi.detectSingleFace(canvas, detectorOptions) // Use canvas as input
             .withFaceLandmarks()
             .withFaceDescriptor();
 
@@ -101,7 +169,7 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
         const noseTip = detection.landmarks.getNose()[3];
 
         if (mode === 'register') {
-            setStatusText('Wajah terdeteksi, memproses...');
+            updateStatusText('Wajah terdeteksi, memproses...');
             detectionStateRef.current = 'PROCESSING';
             stopAllProcesses();
             onRegisterSuccess(detection.descriptor);
@@ -112,7 +180,7 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
             consecutiveFaceFramesRef.current++;
             if (consecutiveFaceFramesRef.current >= STABLE_FACE_FRAMES_REQUIRED) {
                 detectionStateRef.current = 'CAPTURING_BASELINE';
-                setStatusText('Tahan posisi, melihat ke depan.');
+                updateStatusText('Tahan posisi, melihat ke depan.');
             }
         } else if (currentState === 'CAPTURING_BASELINE') {
             baselineRef.current = {
@@ -120,7 +188,6 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                 faceWidth: detection.detection.box.width,
             };
             
-            // Generate a random sequence of challenges if not already generated
             if (challengeSequenceRef.current.length === 0) {
                 let sequence: ChallengeType[] = [];
                 let availableChallenges = [...ALL_CHALLENGES];
@@ -136,7 +203,7 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
             detectionStateRef.current = 'AWAITING_CHALLENGE';
 
             const firstChallenge = challengeSequenceRef.current[0];
-            setStatusText(getChallengeInstruction(firstChallenge));
+            updateStatusText(getChallengeInstruction(firstChallenge));
         
         } else if (currentState === 'AWAITING_CHALLENGE') {
             if (!baselineRef.current || challengeSequenceRef.current.length === 0) return;
@@ -149,7 +216,6 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
             const horizontalThreshold = baselineRef.current.faceWidth * TURN_THRESHOLD_PERCENT;
             const verticalThreshold = baselineRef.current.faceWidth * NOD_THRESHOLD_PERCENT;
 
-            // --- Adaptive Baseline Logic ---
             const isCentered = Math.abs(noseTip.x - baselineRef.current.nose.x) < horizontalThreshold / 3;
             if (isCentered && !challengeState.hasMoved) {
                 const SMOOTHING_FACTOR = 0.5;
@@ -157,14 +223,11 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                 baselineRef.current.nose.y = (SMOOTHING_FACTOR * baselineRef.current.nose.y) + ((1 - SMOOTHING_FACTOR) * noseTip.y);
             }
             
-            // Phase 1: Detect initial movement
             if (!challengeState.hasMoved) {
-                // Due to video mirroring (scale-x-[-1]), the logic is inverted for horizontal movement.
                 if (challenge === 'TURN_RIGHT' && noseTip.x < baselineRef.current.nose.x - horizontalThreshold) challengeState.hasMoved = true;
                 if (challenge === 'TURN_LEFT' && noseTip.x > baselineRef.current.nose.x + horizontalThreshold) challengeState.hasMoved = true;
                 if (challenge === 'NOD' && noseTip.y > baselineRef.current.nose.y + verticalThreshold) challengeState.hasMoved = true;
             }
-            // Phase 2: Detect return to center
             else {
                 if (challenge === 'TURN_RIGHT' && noseTip.x > baselineRef.current.nose.x - (horizontalThreshold / 2)) livenessPassed = true;
                 if (challenge === 'TURN_LEFT' && noseTip.x < baselineRef.current.nose.x + (horizontalThreshold / 2)) livenessPassed = true;
@@ -172,14 +235,16 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
             }
 
             if (livenessPassed) {
+                setChallengeFeedback('success');
+                setTimeout(() => setChallengeFeedback(null), 500);
+
                 const nextStep = currentStep + 1;
                 if (nextStep >= NUM_CHALLENGES) {
-                    // All challenges completed
                     detectionStateRef.current = 'PROCESSING';
                     stopAllProcesses();
-                    setStatusText('Memproses verifikasi...');
+                    updateStatusText('Memproses verifikasi...');
                     
-                    if (!registeredDescriptor) return onVerifyFailure('Data wajah terdaftar tidak ditemukan.');
+                    if (!registeredDescriptor) return handleFailure('Data wajah terdaftar tidak ditemukan.');
                     
                     const faceMatcher = new faceapi.FaceMatcher([registeredDescriptor]);
                     const bestMatch = faceMatcher.findBestMatch(detection.descriptor);
@@ -187,13 +252,12 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                     if (bestMatch.label !== 'unknown' && bestMatch.distance < FACE_MATCH_DISTANCE) {
                         onVerifySuccess();
                     } else {
-                        onVerifyFailure('Verifikasi wajah gagal. Wajah tidak cocok.');
+                        handleFailure('Verifikasi wajah gagal. Wajah tidak cocok.');
                     }
                 } else {
-                    // Move to the next challenge
                     detectionStateRef.current = 'CHALLENGE_TRANSITION';
                     challengeStepRef.current = nextStep;
-                    setStatusText('Bagus! Kembali ke posisi tengah...');
+                    updateStatusText('Bagus! Kembali ke posisi tengah...');
                     
                     setTimeout(() => {
                         baselineRef.current = {
@@ -202,13 +266,13 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                         };
                         challengeStateRef.current = { hasMoved: false };
                         const nextChallenge = challengeSequenceRef.current[nextStep];
-                        setStatusText(getChallengeInstruction(nextChallenge));
+                        updateStatusText(getChallengeInstruction(nextChallenge));
                         detectionStateRef.current = 'AWAITING_CHALLENGE';
-                    }, 700);
+                    }, 250);
                 }
             }
         }
-    }, [mode, onRegisterSuccess, onVerifySuccess, onVerifyFailure, registeredDescriptor, stopAllProcesses]);
+    }, [mode, onRegisterSuccess, onVerifySuccess, registeredDescriptor, stopAllProcesses, resetLivenessState, updateStatusText, handleFailure]);
 
     useEffect(() => {
         const setup = async () => {
@@ -223,7 +287,7 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                 }
                 setAreModelsLoaded(true);
 
-                setStatusText('Mengaktifkan kamera...');
+                updateStatusText('Mengaktifkan kamera...');
                 const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user' } });
                 if (videoRef.current) {
                     videoRef.current.srcObject = stream;
@@ -245,18 +309,19 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                 (videoRef.current.srcObject as MediaStream).getTracks().forEach(track => track.stop());
             }
         };
-    }, [stopAllProcesses]);
+    }, [stopAllProcesses, updateStatusText]);
 
 
     useEffect(() => {
         if (areModelsLoaded && isVideoReady) {
+            isFailureHandledRef.current = false;
             resetLivenessState(false);
-            setStatusText('Posisikan wajah Anda di tengah.');
+            updateStatusText('Posisikan wajah Anda di tengah.');
 
             if (mode === 'verify') {
                 timeoutRef.current = window.setTimeout(() => {
                     if (detectionStateRef.current !== 'PROCESSING') {
-                        onVerifyFailure('Verifikasi gagal: Waktu habis.');
+                        handleFailure('Verifikasi gagal: Waktu habis.');
                     }
                 }, LIVENESS_TIMEOUT);
 
@@ -268,13 +333,27 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                 }, 100);
             }
             
-            intervalRef.current = window.setInterval(runDetection, DETECTION_INTERVAL);
+            let lastDetectionTime = 0;
+            const detectionLoop = (currentTime: number) => {
+                if (currentTime - lastDetectionTime > DETECTION_INTERVAL) {
+                    lastDetectionTime = currentTime;
+                    runDetection();
+                }
+                detectionLoopRef.current = requestAnimationFrame(detectionLoop);
+            };
+            detectionLoopRef.current = requestAnimationFrame(detectionLoop);
         }
-    }, [areModelsLoaded, isVideoReady, mode, runDetection, onVerifyFailure]);
+        
+        return () => {
+            stopAllProcesses();
+        };
+
+    }, [areModelsLoaded, isVideoReady, mode, runDetection, resetLivenessState, updateStatusText, handleFailure, stopAllProcesses]);
 
 
     return (
         <div className="fixed inset-0 bg-black bg-opacity-90 flex flex-col items-center justify-center z-50 p-4">
+            <canvas ref={canvasRef} style={{ display: 'none' }} />
             <div className="relative w-full max-w-sm aspect-square bg-slate-800 rounded-full overflow-hidden shadow-xl border-4 border-slate-700">
                 <video 
                     ref={videoRef} 
@@ -298,7 +377,9 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onRegisterSuccess, onVe
                                 cy="50"
                             />
                             <circle
-                                className="text-sky-500 transition-all duration-300 ease-linear"
+                                className={`transition-all duration-300 ease-linear ${
+                                    challengeFeedback === 'success' ? 'text-green-500' : 'text-sky-500'
+                                }`}
                                 strokeWidth="4"
                                 stroke="currentColor"
                                 fill="transparent"

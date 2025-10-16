@@ -1,6 +1,9 @@
 export interface AttendanceRecord {
   id: string; // Unique identifier from the database
   timestamp: string; // ISO string format for easy storage
+  latitude?: number;
+  longitude?: number;
+  divisi_nama?: string; // Storing division name directly
 }
 
 export enum Page {
@@ -9,6 +12,15 @@ export enum Page {
   LEAVE = 'LEAVE',
   SALARY = 'SALARY',
   PROFILE = 'PROFILE',
+}
+
+// New single interface for the combined table
+export interface AturanAbsensi {
+    id: string;
+    nama_divisi: string;
+    latitude: number;
+    longitude: number;
+    radius_meter: number;
 }
 
 export interface UserProfile {

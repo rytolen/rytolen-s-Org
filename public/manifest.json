@@ -1,0 +1,18 @@
+
+{
+  "name": "Portal Karyawan Terpadu",
+  "short_name": "Portal Karyawan",
+  "description": "Aplikasi web mobile lengkap untuk karyawan. Fitur termasuk absensi via pemindaian QR, melihat riwayat kehadiran, mengajukan cuti, mengecek rincian pendapatan, dan mengelola profil pribadi.",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#f1f5f9",
+  "theme_color": "#0284c7",
+  "icons": [
+    {
+      "src": "/icon.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import HomePage from './pages/HomePage';
 import HistoryPage from './pages/HistoryPage';
 import LeavePage from './pages/LeavePage';
@@ -7,9 +7,10 @@ import ProfilePage from './pages/ProfilePage';
 import FaceScanner from './components/FaceScanner';
 import Toast from './components/Toast';
 import LoginPage from './pages/LoginPage';
+import DivisionSelectionModal from './components/DivisionSelectionModal';
 import { supabase } from './lib/supabase';
 
-import { AttendanceRecord, Page, UserProfile, LeaveRequest, LeaveStatus, SalarySlip, FaceDescriptor } from './types';
+import { AttendanceRecord, Page, UserProfile, LeaveRequest, LeaveStatus, SalarySlip, FaceDescriptor, AturanAbsensi } from './types';
 import type { RealtimeChannel, PostgrestError } from '@supabase/supabase-js';
 
 // Mock Data for features not yet in DB
@@ -28,8 +29,128 @@ const MOCK_SALARY_SLIPS: SalarySlip[] = [
 // Helper to get date string in YYYY-MM-DD format based on UTC
 const getUtcDateString = (d: Date): string => d.toISOString().split('T')[0];
 
-const App: React.FC = () => {
-    const [activePage, setActivePage] = useState<Page>(Page.HOME);
+// --- Geolocation Helpers ---
+const haversineDistance = (coords1: {lat: number, lon: number}, coords2: {lat: number, lon: number}): number => {
+    const R = 6371e3; // metres
+    const φ1 = coords1.lat * Math.PI/180; // φ, λ in radians
+    const φ2 = coords2.lat * Math.PI/180;
+    const Δφ = (coords2.lat-coords1.lat) * Math.PI/180;
+    const Δλ = (coords2.lon-coords1.lon) * Math.PI/180;
+
+    const a = Math.sin(Δφ/2) * Math.sin(Δφ/2) +
+              Math.cos(φ1) * Math.cos(φ2) *
+              Math.sin(Δλ/2) * Math.sin(Δλ/2);
+    const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1-a));
+
+    return R * c; // in metres
+}
+
+// --- Anti Mock Location Helpers ---
+const STABILITY_THRESHOLD = 10; // Number of consecutive stable updates to be considered suspicious.
+const MIN_VALID_READINGS_REQUIRED = 3; // Number of consecutive valid readings needed to trust the GPS signal.
+
+const analyzeSignalStability = (
+    history: GeolocationCoordinates[],
+    stagnantCoordsCount: React.MutableRefObject<number>,
+    stagnantAccuracyCount: React.MutableRefObject<number>
+): boolean => {
+    // We need at least two data points to compare behavior.
+    if (history.length < 2) {
+        return false;
+    }
+
+    const currentCoords = history[0];
+    const previousCoords = history[1];
+
+    // --- Coordinate Stability Check ---
+    if (currentCoords.latitude === previousCoords.latitude && currentCoords.longitude === previousCoords.longitude) {
+        stagnantCoordsCount.current++;
+    } else {
+        // Any movement, no matter how small, resets the counter. This prevents false positives for stationary users.
+        stagnantCoordsCount.current = 0;
+    }
+
+    // --- Accuracy Stability Check ---
+    if (currentCoords.accuracy === previousCoords.accuracy) {
+        stagnantAccuracyCount.current++;
+    } else {
+        // Any fluctuation in accuracy also resets the counter.
+        stagnantAccuracyCount.current = 0;
+    }
+
+    // --- Final Verdict ---
+    if (stagnantCoordsCount.current >= STABILITY_THRESHOLD) {
+        console.warn(`Lokasi tidak valid: Koordinat statis selama ${stagnantCoordsCount.current} pembaruan.`);
+        return true;
+    }
+    if (stagnantAccuracyCount.current >= STABILITY_THRESHOLD) {
+        console.warn(`Lokasi tidak valid: Akurasi statis selama ${stagnantAccuracyCount.current} pembaruan.`);
+        return true;
+    }
+
+    return false;
+};
+
+
+const isMockLocation = (
+    position: GeolocationPosition, 
+    locationHistory: GeolocationCoordinates[],
+    stagnantCoordsCount: React.MutableRefObject<number>,
+    stagnantAccuracyCount: React.MutableRefObject<number>
+): boolean => {
+    // Layer 1: Check for the non-standard `isMock` flag.
+    if ((position as any).isMock === true) {
+        console.warn("Lokasi tidak valid terdeteksi via isMock flag.");
+        return true;
+    }
+
+    // Layer 2: Check for overly precise accuracy. Real GPS is almost never perfect.
+    // A threshold of strictly less than 1 meter catches most mock apps.
+    if (position.coords.accuracy < 1) {
+        console.warn(`Lokasi tidak valid: Akurasi tidak wajar ${position.coords.accuracy}m.`);
+        return true;
+    }
+
+    // Layer 3: Check the timestamp. If it's too old, it might be a replayed location.
+    const locationAge = Date.now() - position.timestamp;
+    if (locationAge > 5000) { // More than 5 seconds old
+        console.warn(`Lokasi tidak valid: Timestamp usang (${locationAge}ms).`);
+        return true;
+    }
+    
+    // Layer 4: Behavioral analysis of the GPS signal over time.
+    if (analyzeSignalStability(locationHistory, stagnantCoordsCount, stagnantAccuracyCount)) {
+        return true;
+    }
+
+    return false;
+};
+
+
+// --- Routing Helpers ---
+const pageToHash: Record<Page, string> = {
+    [Page.HOME]: '#/',
+    [Page.HISTORY]: '#/history',
+    [Page.LEAVE]: '#/leave',
+    [Page.SALARY]: '#/salary',
+    [Page.PROFILE]: '#/profile',
+};
+
+const hashToPage = (hash: string): Page => {
+    switch (hash) {
+        case '#/history': return Page.HISTORY;
+        case '#/leave': return Page.LEAVE;
+        case '#/salary': return Page.SALARY;
+        case '#/profile': return Page.PROFILE;
+        case '#/':
+        case '':
+        default:
+            return Page.HOME;
+    }
+};
+
+export const App: React.FC = () => {
+    const [activePage, setActivePage] = useState<Page>(() => hashToPage(window.location.hash));
     const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
     const [isAuthenticating, setIsAuthenticating] = useState(true);
     const [isHomePageLoading, setIsHomePageLoading] = useState(true);
@@ -43,7 +164,38 @@ const App: React.FC = () => {
     const [userFaceDescriptor, setUserFaceDescriptor] = useState<FaceDescriptor | null>(null);
     const [toast, setToast] = useState<{ message: string, type: 'success' | 'error' } | null>(null);
     
-    // Check for existing session on initial load
+    // Geolocation and Division State
+    const [currentLocation, setCurrentLocation] = useState<GeolocationCoordinates | null>(null);
+    const [locationStatus, setLocationStatus] = useState<'checking' | 'allowed' | 'denied' | 'out_of_range'>('checking');
+    const [availableAttendanceRules, setAvailableAttendanceRules] = useState<AturanAbsensi[]>([]);
+    const [allAttendanceRules, setAllAttendanceRules] = useState<AturanAbsensi[]>([]);
+    const [attendanceRulesError, setAttendanceRulesError] = useState<string | null>(null);
+    const [isDivisionModalVisible, setDivisionModalVisible] = useState(false);
+    const [selectedRuleForAttendance, setSelectedRuleForAttendance] = useState<AturanAbsensi | null>(null);
+    const [locationHistory, setLocationHistory] = useState<GeolocationCoordinates[]>([]);
+    
+    // Refs for mock location detection
+    const stagnantCoordsCountRef = useRef(0);
+    const stagnantAccuracyCountRef = useRef(0);
+    const consecutiveValidReadingsRef = useRef(0);
+    
+
+    // --- Navigation Logic ---
+    const handleNavigate = useCallback((page: Page) => {
+        const newHash = pageToHash[page];
+        if (window.location.hash !== newHash) {
+            window.location.hash = newHash;
+        }
+    }, []);
+
+    useEffect(() => {
+        const handleHashChange = () => {
+            setActivePage(hashToPage(window.location.hash));
+        };
+        window.addEventListener('hashchange', handleHashChange);
+        return () => window.removeEventListener('hashchange', handleHashChange);
+    }, []);
+    
     useEffect(() => {
         const checkSession = async () => {
             try {
@@ -59,12 +211,110 @@ const App: React.FC = () => {
         };
         checkSession();
     }, []);
+    
+     const showToast = useCallback((message: string, type: 'success' | 'error') => {
+        setToast({ message, type });
+    }, []);
+
+    // Geolocation watcher
+    useEffect(() => {
+        if (!currentUser || hasClockedInToday) {
+            // Stop watching if user is not logged in or has already clocked in
+            stagnantCoordsCountRef.current = 0;
+            stagnantAccuracyCountRef.current = 0;
+            consecutiveValidReadingsRef.current = 0;
+            return;
+        }
+
+        // Set initial status to checking
+        setLocationStatus('checking');
+
+        const watcher = navigator.geolocation.watchPosition(
+            (position) => {
+                const newHistory = [position.coords, ...locationHistory].slice(0, STABILITY_THRESHOLD);
+                setLocationHistory(newHistory);
+                
+                if (isMockLocation(position, newHistory, stagnantCoordsCountRef, stagnantAccuracyCountRef)) {
+                    consecutiveValidReadingsRef.current = 0; // Reset trust counter
+                    setLocationStatus('denied');
+                    showToast('Lokasi tidak valid terdeteksi.', 'error');
+                    setCurrentLocation(null);
+                    return;
+                }
+                
+                // If the signal is valid, increment the trust counter
+                consecutiveValidReadingsRef.current++;
+                setCurrentLocation(position.coords);
+            },
+            (error) => {
+                console.error("Geolocation error:", error);
+                consecutiveValidReadingsRef.current = 0; // Reset trust counter
+                setLocationStatus('denied');
+                showToast('Akses lokasi ditolak.', 'error');
+            },
+            { enableHighAccuracy: true, timeout: 10000, maximumAge: 0 }
+        );
+
+        return () => {
+             navigator.geolocation.clearWatch(watcher);
+             consecutiveValidReadingsRef.current = 0; // Reset on cleanup
+        }
+    }, [currentUser, hasClockedInToday, showToast, locationHistory]);
+
+    // Location validation logic - REVAMPED to prevent loops
+    useEffect(() => {
+        // Do nothing if we don't have the necessary data yet. The status will remain 'checking'.
+        if (!currentLocation || !currentUser || isHomePageLoading) {
+            return;
+        }
+    
+        // If there was an error loading rules or the rules are empty, set to out_of_range.
+        if (attendanceRulesError || allAttendanceRules.length === 0) {
+            setLocationStatus('out_of_range');
+            setAvailableAttendanceRules([]);
+            return;
+        }
+        
+        const activeRules = allAttendanceRules.filter(rule => {
+            const parseNumber = (value: any): number => {
+                if (typeof value === 'number') return value;
+                if (typeof value !== 'string') return NaN;
+                return parseFloat(value.replace(',', '.'));
+            };
+
+            const ruleLat = parseNumber(rule.latitude);
+            const ruleLon = parseNumber(rule.longitude);
+            const ruleRadius = parseNumber(rule.radius_meter);
+
+            if (isNaN(ruleLat) || isNaN(ruleLon) || isNaN(ruleRadius)) return false;
+
+            const distance = haversineDistance(
+                { lat: currentLocation.latitude, lon: currentLocation.longitude },
+                { lat: ruleLat, lon: ruleLon }
+            );
+            return distance <= ruleRadius;
+        });
+    
+        if (activeRules.length > 0) {
+            // Only allow attendance if we have a few consecutive valid readings to trust the signal.
+            if (consecutiveValidReadingsRef.current >= MIN_VALID_READINGS_REQUIRED) {
+                setLocationStatus('allowed');
+                setAvailableAttendanceRules(activeRules);
+            }
+            // If not trusted yet, the status implicitly remains 'checking'. No need to set it again.
+        } else {
+            // If in range of no rules, user is out of range.
+            setLocationStatus('out_of_range');
+            setAvailableAttendanceRules([]);
+        }
+    
+    }, [currentLocation, currentUser, allAttendanceRules, isHomePageLoading, attendanceRulesError, hasClockedInToday]);
+
 
     // Set up real-time listeners when user logs in
     useEffect(() => {
         if (!currentUser) return;
 
-        // Listener for attendance records changes (INSERT, DELETE)
         const attendanceChannel: RealtimeChannel = supabase
             .channel(`public:riwayat_absensi:karyawan_id=eq.${currentUser.employeeId}`)
             .on(
@@ -85,14 +335,10 @@ const App: React.FC = () => {
                     } else if (payload.eventType === 'DELETE') {
                         const deletedId = payload.old.id as string;
                         if (!deletedId) return;
-
-                        // Find the record in the current state before removing it.
-                        const deletedRecord = recentAttendanceLog.find(r => r.id === deletedId);
                         
-                        // Now remove it from the state.
+                        const deletedRecord = recentAttendanceLog.find(r => r.id === deletedId);
                         setRecentAttendanceLog(prevLog => prevLog.filter(record => record.id !== deletedId));
 
-                        // If we found the record, we can check its timestamp to update today's status.
                         if (deletedRecord && getUtcDateString(new Date(deletedRecord.timestamp)) === todayUtc) {
                             setHasClockedInToday(false);
                         }
@@ -102,7 +348,6 @@ const App: React.FC = () => {
             .subscribe();
 
 
-        // Listener for face data updates
         const faceDataChannel: RealtimeChannel = supabase
              .channel(`public:wajah_karyawan:karyawan_id=eq.${currentUser.employeeId}`)
             .on(
@@ -110,8 +355,7 @@ const App: React.FC = () => {
                 { event: '*', schema: 'public', table: 'wajah_karyawan', filter: `karyawan_id=eq.${currentUser.employeeId}` },
                 (payload) => {
                     if (payload.eventType === 'INSERT' || payload.eventType === 'UPDATE') {
-                        const newDescriptor = payload.new.descriptor;
-                        setUserFaceDescriptor(new Float32Array(newDescriptor));
+                        setUserFaceDescriptor(new Float32Array(payload.new.descriptor));
                     } else if (payload.eventType === 'DELETE') {
                         setUserFaceDescriptor(null);
                     }
@@ -119,7 +363,6 @@ const App: React.FC = () => {
             )
             .subscribe();
 
-        // Cleanup function to remove subscriptions
         return () => {
             supabase.removeChannel(attendanceChannel);
             supabase.removeChannel(faceDataChannel);
@@ -131,24 +374,21 @@ const App: React.FC = () => {
         const { data: karyawanData, error } = await supabase
             .from('karyawan')
             .select('id, nama, status, tanggal_bergabung, jabatan(nama_jabatan)')
-            .ilike('id', employeeId);
+            .ilike('id', employeeId)
+            .single();
 
-        if (error) {
-            throw new Error(`Error dari Supabase: ${error.message}`);
+        if (error || !karyawanData) {
+            throw new Error(`Error: ${error?.message || "ID Karyawan tidak ditemukan."}`);
         }
         
-        if (!karyawanData || karyawanData.length === 0) {
-            throw new Error("ID Karyawan tidak ditemukan di database.");
-        }
-        
-        const userRecord = karyawanData[0] as any;
+        const userRecord = karyawanData as any;
 
         if (userRecord.status.toLowerCase() !== 'aktif') {
-            throw new Error(`Login ditolak. Status karyawan: "${userRecord.status}". Diperlukan status "aktif".`);
+            throw new Error(`Login ditolak. Status karyawan: "${userRecord.status}".`);
         }
         
         const positionName = userRecord.jabatan?.nama_jabatan || 'Jabatan tidak terdaftar';
-        
+
         const userProfile: UserProfile = {
             employeeId: userRecord.id,
             name: userRecord.nama,
@@ -164,56 +404,71 @@ const App: React.FC = () => {
         await loadUserSpecificData(employeeId);
     };
     
+    // REVAMPED: More robust data loading function
     const loadUserSpecificData = async (userId: string) => {
         setIsHomePageLoading(true);
-        try {
-            const [attendanceResult, faceResult] = await Promise.all([
-                supabase
-                    .from('riwayat_absensi')
-                    .select('id, timestamp_masuk')
-                    .eq('karyawan_id', userId)
-                    .order('timestamp_masuk', { ascending: false })
-                    .limit(5),
-                supabase
-                    .from('wajah_karyawan')
-                    .select('descriptor')
-                    .eq('karyawan_id', userId)
-                    .single()
-            ]);
+        setAttendanceRulesError(null);
 
-            // Process attendance data
-            const { data: attendanceData, error: attendanceError } = attendanceResult;
+        try {
+            // Fetch attendance rules
+            const { data: allRulesData, error: allRulesError } = await supabase
+                .from('aturan_absensi')
+                .select('*');
+            
+            if (allRulesError) {
+                console.error("Gagal memuat aturan absensi:", allRulesError);
+                setAttendanceRulesError(allRulesError.message);
+                setAllAttendanceRules([]);
+            } else {
+                setAllAttendanceRules(allRulesData || []);
+            }
+
+            // Fetch attendance history
+            const { data: attendanceData, error: attendanceError } = await supabase
+                .from('riwayat_absensi')
+                .select('id, timestamp_masuk')
+                .eq('karyawan_id', userId)
+                .order('timestamp_masuk', { ascending: false })
+                .limit(5);
+
             if (attendanceError) {
                 console.error("Gagal memuat riwayat absensi:", attendanceError);
                 setRecentAttendanceLog([]);
+                setHasClockedInToday(false);
             } else {
                 const formattedLog = attendanceData.map(log => ({ id: log.id, timestamp: log.timestamp_masuk }));
                 setRecentAttendanceLog(formattedLog);
                 const todayUtc = getUtcDateString(new Date());
                 const hasClockedIn = formattedLog.some(record => getUtcDateString(new Date(record.timestamp)) === todayUtc);
                 setHasClockedInToday(hasClockedIn);
+                if (hasClockedIn) {
+                    setLocationStatus('allowed');
+                }
             }
 
-            // Process face data
-            const { data: faceData, error: faceError } = faceResult;
-            if (faceError && faceError.code !== 'PGRST116') { // Ignore no rows error
-                console.warn("Data wajah belum ada atau gagal dimuat:", faceError.message);
+            // Fetch face data
+            const { data: faceData, error: faceError } = await supabase
+                .from('wajah_karyawan')
+                .select('descriptor')
+                .eq('karyawan_id', userId)
+                .limit(1);
+                
+            if (faceError) {
+                console.warn("Gagal memuat data wajah:", faceError.message);
                 setUserFaceDescriptor(null);
-            } else if (faceData && faceData.descriptor) {
-                setUserFaceDescriptor(new Float32Array(faceData.descriptor as any));
+            } else if (faceData && faceData.length > 0 && faceData[0].descriptor) {
+                setUserFaceDescriptor(new Float32Array(faceData[0].descriptor as any));
             } else {
                 setUserFaceDescriptor(null);
             }
-
         } catch (error) {
-            console.error("Gagal memuat data spesifik pengguna:", error);
-            setRecentAttendanceLog([]);
-            setHasClockedInToday(false);
-            setUserFaceDescriptor(null);
+            console.error("Terjadi error kritis saat memuat data:", error);
+            setAttendanceRulesError("Gagal memuat semua data aplikasi.");
         } finally {
             setIsHomePageLoading(false);
         }
     };
+
     
     const handleLogin = async (employeeId: string): Promise<{ success: boolean; message: string }> => {
         try {
@@ -229,22 +484,28 @@ const App: React.FC = () => {
     const handleLogout = () => {
         supabase.removeAllChannels();
         setCurrentUser(null);
-        setActivePage(Page.HOME);
+        handleNavigate(Page.HOME);
         localStorage.removeItem('loggedInUserId');
         setUserFaceDescriptor(null);
         setIsHomePageLoading(true);
+        setCurrentLocation(null);
+        setAvailableAttendanceRules([]);
+        setAllAttendanceRules([]);
+        setLocationHistory([]);
+        consecutiveValidReadingsRef.current = 0;
+        stagnantCoordsCountRef.current = 0;
+        stagnantAccuracyCountRef.current = 0;
     };
     
-    const showToast = useCallback((message: string, type: 'success' | 'error') => {
-        setToast({ message, type });
-    }, []);
-    
-    const handleAttendance = useCallback(async () => {
-        if (!currentUser) return;
+    const handleAttendance = useCallback(async (rule: AturanAbsensi | null) => {
+        if (!currentUser || !currentLocation || !rule) return;
 
         const newRecord = {
             karyawan_id: currentUser.employeeId,
-            timestamp_masuk: new Date().toISOString()
+            timestamp_masuk: new Date().toISOString(),
+            latitude_absen: currentLocation.latitude,
+            longitude_absen: currentLocation.longitude,
+            divisi_nama: rule.nama_divisi,
         };
 
         const { error } = await supabase.from('riwayat_absensi').insert(newRecord);
@@ -252,18 +513,16 @@ const App: React.FC = () => {
         if (error) {
             const isDuplicate = (error as PostgrestError).code === '23505';
             if (isDuplicate) {
-                console.warn('Attempted to clock in twice. UI state will be synced.');
                 setHasClockedInToday(true);
                 return;
             }
-
             console.error("Gagal menyimpan absensi:", error);
             showToast('Gagal menyimpan absensi.', 'error');
             return;
         }
         
         showToast('Absen Masuk Berhasil!', 'success');
-    }, [currentUser, showToast]);
+    }, [currentUser, showToast, currentLocation]);
     
     const handleRegisterSuccess = async (descriptor: FaceDescriptor) => {
         if (!currentUser) return;
@@ -288,9 +547,14 @@ const App: React.FC = () => {
         showToast('Wajah berhasil didaftarkan!', 'success');
     };
 
+    const openScanner = (mode: 'register' | 'verify') => {
+        setScannerMode(mode);
+        setScannerVisible(true);
+    };
+
     const handleVerifySuccess = () => {
         setScannerVisible(false);
-        handleAttendance();
+        handleAttendance(selectedRuleForAttendance);
     };
 
     const handleVerifyFailure = (error: string) => {
@@ -298,18 +562,26 @@ const App: React.FC = () => {
         showToast(error, 'error');
     };
 
+    const handleOpenDivisionModal = () => {
+        if (availableAttendanceRules.length > 0) {
+            setDivisionModalVisible(true);
+        }
+    };
+
+    const handleRuleSelected = (rule: AturanAbsensi) => {
+        setSelectedRuleForAttendance(rule);
+        setDivisionModalVisible(false);
+        openScanner('verify');
+    };
+
+
     const handleAddLeaveRequest = (request: Omit<LeaveRequest, 'id' | 'status'>) => {
         const newRequest: LeaveRequest = { ...request, id: `L${Date.now()}`, status: LeaveStatus.PENDING };
         setLeaveRequests(prev => [newRequest, ...prev]);
         showToast('Pengajuan cuti berhasil dikirim!', 'success');
-        setActivePage(Page.HOME);
+        handleNavigate(Page.HOME);
     };
 
-    const openScanner = (mode: 'register' | 'verify') => {
-        setScannerMode(mode);
-        setScannerVisible(true);
-    }
-    
     if (isAuthenticating) {
         return <div className="min-h-screen flex items-center justify-center bg-slate-100"><p>Loading...</p></div>;
     }
@@ -319,21 +591,22 @@ const App: React.FC = () => {
     }
 
     const renderPage = () => {
-        if (activePage === Page.HOME) {
-             return <HomePage
-                user={currentUser}
-                hasClockedInToday={hasClockedInToday}
-                attendanceLog={recentAttendanceLog}
-                onScanClick={() => openScanner('verify')}
-                onNavigate={setActivePage}
-                isFaceRegistered={!!userFaceDescriptor}
-                isLoading={isHomePageLoading}
-            />;
-        }
-
-        const onBack = () => setActivePage(Page.HOME);
+        const onBack = () => handleNavigate(Page.HOME);
 
         switch (activePage) {
+            case Page.HOME:
+                return <HomePage
+                    user={currentUser}
+                    hasClockedInToday={hasClockedInToday}
+                    attendanceLog={recentAttendanceLog}
+                    onOpenDivisionModal={handleOpenDivisionModal}
+                    onNavigate={handleNavigate}
+                    isFaceRegistered={!!userFaceDescriptor}
+                    isLoading={isHomePageLoading}
+                    availableAttendanceRules={availableAttendanceRules}
+                    locationStatus={locationStatus}
+                    attendanceRulesError={attendanceRulesError}
+                />;
             case Page.HISTORY:
                 return <HistoryPage user={currentUser} onBack={onBack} />;
             case Page.LEAVE:
@@ -347,10 +620,13 @@ const App: React.FC = () => {
                     user={currentUser}
                     hasClockedInToday={hasClockedInToday}
                     attendanceLog={recentAttendanceLog}
-                    onScanClick={() => openScanner('verify')}
-                    onNavigate={setActivePage}
+                    onOpenDivisionModal={handleOpenDivisionModal}
+                    onNavigate={handleNavigate}
                     isFaceRegistered={!!userFaceDescriptor}
                     isLoading={isHomePageLoading}
+                    availableAttendanceRules={availableAttendanceRules}
+                    locationStatus={locationStatus}
+                    attendanceRulesError={attendanceRulesError}
                 />;
         }
     };
@@ -360,7 +636,15 @@ const App: React.FC = () => {
             <main>
                 {renderPage()}
             </main>
-            
+
+            {isDivisionModalVisible && (
+                <DivisionSelectionModal
+                    rules={availableAttendanceRules}
+                    onSelect={handleRuleSelected}
+                    onClose={() => setDivisionModalVisible(false)}
+                />
+            )}
+
             {isScannerVisible && (
                 <FaceScanner
                     mode={scannerMode}
@@ -376,5 +660,3 @@ const App: React.FC = () => {
         </div>
     );
 };
-
-export default App;

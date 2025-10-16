@@ -1,5 +1,5 @@
 import React from 'react';
-import { UserProfile, AttendanceRecord, Page } from '../types';
+import { UserProfile, AttendanceRecord, Page, AturanAbsensi } from '../types';
 import Clock from '../components/Clock';
 import StatusDisplay from '../components/StatusDisplay';
 import ActionButton from '../components/ActionButton';
@@ -9,10 +9,13 @@ interface HomePageProps {
   user: UserProfile;
   hasClockedInToday: boolean;
   attendanceLog: AttendanceRecord[];
-  onScanClick: () => void;
+  onOpenDivisionModal: () => void;
   onNavigate: (page: Page) => void;
   isFaceRegistered: boolean;
   isLoading: boolean;
+  availableAttendanceRules: AturanAbsensi[];
+  locationStatus: 'checking' | 'allowed' | 'denied' | 'out_of_range';
+  attendanceRulesError: string | null;
 }
 
 // --- Icons ---
@@ -61,16 +64,48 @@ const MenuItem: React.FC<{ label: string; icon: React.ReactNode; onClick: () => 
 
 const ActionPanelSkeleton: React.FC = () => (
     <div className="animate-pulse py-1">
-        <div className="h-8 bg-slate-200 rounded-full w-48 mx-auto my-4"></div> {/* Placeholder for StatusDisplay */}
-        <div className="h-14 bg-slate-200 rounded-xl mt-4"></div> {/* Placeholder for ActionButton */}
+        <div className="h-8 bg-slate-200 rounded-full w-48 mx-auto my-4"></div>
+        <div className="h-8 bg-slate-200 rounded-lg w-full mt-2 mb-4"></div>
+        <div className="h-14 bg-slate-200 rounded-xl mt-4"></div>
     </div>
 );
 
+const LocationStatusIndicator: React.FC<{ status: HomePageProps['locationStatus'], isLoading: boolean }> = ({ status, isLoading }) => {
+    const effectiveStatus = isLoading ? 'checking' : status;
+    const configs = {
+        checking: { text: 'Mengecek lokasi...', color: 'text-slate-500', icon: <svg className="w-4 h-4 animate-spin" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24"><circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle><path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>},
+        allowed: { text: 'Anda berada di lokasi', color: 'text-green-600', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" /></svg> },
+        denied: { text: 'Akses lokasi ditolak', color: 'text-red-600', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" /></svg> },
+        out_of_range: { text: 'Anda di luar jangkauan', color: 'text-yellow-600', icon: <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor"><path fillRule="evenodd" d="M8.257 3.099c.636-1.21 2.37-1.21 3.006 0l5.429 10.372c.63 1.203-.284 2.629-1.503 2.629H4.331c-1.22 0-2.133-1.426-1.503-2.629L8.257 3.099zM10 6a.75.75 0 01.75.75v3.5a.75.75 0 01-1.5 0v-3.5A.75.75 0 0110 6zm0 8a1 1 0 100-2 1 1 0 000 2z" clipRule="evenodd" /></svg> }
+    };
+    const current = configs[effectiveStatus];
+    return <div className={`flex items-center justify-center gap-2 text-sm font-semibold ${current.color}`}>
+        {current.icon}
+        <span>{current.text}</span>
+    </div>
+}
 
-const HomePage: React.FC<HomePageProps> = ({ user, hasClockedInToday, attendanceLog, onScanClick, onNavigate, isFaceRegistered, isLoading }) => {
+const HomePage: React.FC<HomePageProps> = ({ 
+    user, hasClockedInToday, attendanceLog, onOpenDivisionModal, onNavigate, 
+    isFaceRegistered, isLoading, availableAttendanceRules,
+    locationStatus, attendanceRulesError 
+}) => {
+    
+    const isLocationAllowed = locationStatus === 'allowed' && availableAttendanceRules.length > 0;
+
+    const getButtonLabel = () => {
+        if (isLoading) return "Memuat data...";
+        if (hasClockedInToday) return "Anda Sudah Absen";
+        if (locationStatus === 'checking') return "Mengecek Lokasi...";
+        if (locationStatus === 'denied') return "Akses Lokasi Ditolak";
+        if (locationStatus === 'out_of_range') return "Anda di Luar Jangkauan";
+        if (!isFaceRegistered) return "Daftarkan Wajah Dahulu";
+        if (isLocationAllowed) return "Absen Hari Ini";
+        return "Tunggu..."; // Fallback for intermediate states
+    };
+    
     return (
         <div className="bg-slate-100 min-h-screen">
-            {/* --- Header --- */}
             <header className="bg-sky-600 px-6 pt-6 pb-20 rounded-b-3xl text-white shadow-lg">
                 <div className="flex items-center gap-4">
                     <img src={user.avatarUrl} alt={user.name} className="w-14 h-14 rounded-full border-2 border-white/50" />
@@ -81,7 +116,6 @@ const HomePage: React.FC<HomePageProps> = ({ user, hasClockedInToday, attendance
                 </div>
             </header>
 
-            {/* --- Main Action Panel --- */}
             <div className="px-4 -mt-10">
                 <div className="bg-white rounded-2xl shadow-xl p-4 text-center">
                     <Clock />
@@ -90,22 +124,27 @@ const HomePage: React.FC<HomePageProps> = ({ user, hasClockedInToday, attendance
                     ) : (
                         <>
                             <StatusDisplay hasClockedInToday={hasClockedInToday} />
-                            <div className="mt-4">
+                            <div className="my-4 h-6">
+                                <LocationStatusIndicator status={locationStatus} isLoading={locationStatus === 'checking'} />
+                            </div>
+                            <div className="mt-2">
                                 <ActionButton
-                                    label={hasClockedInToday ? "Anda Sudah Absen" : "Absen Hari Ini"}
-                                    onClick={onScanClick}
+                                    label={getButtonLabel()}
+                                    onClick={onOpenDivisionModal}
                                     className={hasClockedInToday ? "bg-green-600" : "bg-sky-600 focus:ring-sky-500"}
                                     Icon={FaceScanIcon}
-                                    disabled={!isFaceRegistered || hasClockedInToday}
+                                    disabled={!isFaceRegistered || hasClockedInToday || !isLocationAllowed || isLoading}
                                 />
                                 {!isFaceRegistered && <p className="text-xs text-red-500 mt-2">Daftarkan wajah Anda di menu Profil terlebih dahulu.</p>}
+                                {isFaceRegistered && !hasClockedInToday && locationStatus === 'out_of_range' && !isLoading &&
+                                    <p className="text-xs text-yellow-600 mt-2">Tidak ada divisi yang tersedia untuk absen di lokasi Anda saat ini.</p>
+                                }
                             </div>
                         </>
                     )}
                 </div>
             </div>
 
-            {/* --- Menu Grid --- */}
             <div className="p-6">
                  <div className="grid grid-cols-4 gap-4">
                     <MenuItem label="Riwayat" icon={<HistoryIcon className="w-8 h-8 text-sky-600"/>} onClick={() => onNavigate(Page.HISTORY)} />
@@ -115,7 +154,6 @@ const HomePage: React.FC<HomePageProps> = ({ user, hasClockedInToday, attendance
                 </div>
             </div>
 
-            {/* --- Recent Activity --- */}
             <div className="pb-6">
                 <AttendanceLog records={attendanceLog} title="Aktivitas Terbaru" showEmptyState={true} />
             </div>
