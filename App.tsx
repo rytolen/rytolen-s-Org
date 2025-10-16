@@ -46,84 +46,9 @@ const haversineDistance = (coords1: {lat: number, lon: number}, coords2: {lat: n
     return R * c; // in metres
 }
 
-// --- Anti Mock Location Helpers ---
-const STABILITY_THRESHOLD = 10; // Number of consecutive stable updates to be considered suspicious.
-const MIN_VALID_READINGS_REQUIRED = 3; // Number of consecutive valid readings needed to trust the GPS signal.
-
-const analyzeSignalStability = (
-    history: GeolocationCoordinates[],
-    stagnantCoordsCount: React.MutableRefObject<number>,
-    stagnantAccuracyCount: React.MutableRefObject<number>
-): boolean => {
-    // We need at least two data points to compare behavior.
-    if (history.length < 2) {
-        return false;
-    }
-
-    const currentCoords = history[0];
-    const previousCoords = history[1];
-
-    // --- Coordinate Stability Check ---
-    if (currentCoords.latitude === previousCoords.latitude && currentCoords.longitude === previousCoords.longitude) {
-        stagnantCoordsCount.current++;
-    } else {
-        // Any movement, no matter how small, resets the counter. This prevents false positives for stationary users.
-        stagnantCoordsCount.current = 0;
-    }
-
-    // --- Accuracy Stability Check ---
-    if (currentCoords.accuracy === previousCoords.accuracy) {
-        stagnantAccuracyCount.current++;
-    } else {
-        // Any fluctuation in accuracy also resets the counter.
-        stagnantAccuracyCount.current = 0;
-    }
-
-    // --- Final Verdict ---
-    if (stagnantCoordsCount.current >= STABILITY_THRESHOLD) {
-        console.warn(`Lokasi tidak valid: Koordinat statis selama ${stagnantCoordsCount.current} pembaruan.`);
-        return true;
-    }
-    if (stagnantAccuracyCount.current >= STABILITY_THRESHOLD) {
-        console.warn(`Lokasi tidak valid: Akurasi statis selama ${stagnantAccuracyCount.current} pembaruan.`);
-        return true;
-    }
-
-    return false;
-};
-
-
-const isMockLocation = (
-    position: GeolocationPosition, 
-    locationHistory: GeolocationCoordinates[],
-    stagnantCoordsCount: React.MutableRefObject<number>,
-    stagnantAccuracyCount: React.MutableRefObject<number>
-): boolean => {
-    // Layer 1: Check for the non-standard `isMock` flag.
-    if ((position as any).isMock === true) {
-        console.warn("Lokasi tidak valid terdeteksi via isMock flag.");
-        return true;
-    }
-
-    // Layer 2: Check for overly precise accuracy. Real GPS is almost never perfect.
-    // A threshold of strictly less than 1 meter catches most mock apps.
-    if (position.coords.accuracy < 1) {
-        console.warn(`Lokasi tidak valid: Akurasi tidak wajar ${position.coords.accuracy}m.`);
-        return true;
-    }
-
-    // Layer 3: Check the timestamp. If it's too old, it might be a replayed location.
-    const locationAge = Date.now() - position.timestamp;
-    if (locationAge > 5000) { // More than 5 seconds old
-        console.warn(`Lokasi tidak valid: Timestamp usang (${locationAge}ms).`);
-        return true;
-    }
-    
-    // Layer 4: Behavioral analysis of the GPS signal over time.
-    if (analyzeSignalStability(locationHistory, stagnantCoordsCount, stagnantAccuracyCount)) {
-        return true;
-    }
-
+// --- Anti Mock Location Stub ---
+const isMockLocation = (): boolean => {
+    // All fake GPS protections are temporarily disabled.
     return false;
 };
 
@@ -173,11 +98,6 @@ export const App: React.FC = () => {
     const [attendanceRulesError, setAttendanceRulesError] = useState<string | null>(null);
     const [isDivisionModalVisible, setDivisionModalVisible] = useState(false);
     const [selectedRuleForAttendance, setSelectedRuleForAttendance] = useState<AturanAbsensi | null>(null);
-    
-    // Refs for mock location detection
-    const stagnantCoordsCountRef = useRef(0);
-    const stagnantAccuracyCountRef = useRef(0);
-    const consecutiveValidReadingsRef = useRef(0);
     
     // PWA Install Prompt State
     const [installPromptEvent, setInstallPromptEvent] = useState<Event | null>(null);
@@ -254,38 +174,27 @@ export const App: React.FC = () => {
         setToast({ message, type });
     }, []);
 
-    // Geolocation watcher - REVAMPED to be stable
+    // Geolocation watcher
     useEffect(() => {
         if (!currentUser || hasClockedInToday) {
-            stagnantCoordsCountRef.current = 0;
-            stagnantAccuracyCountRef.current = 0;
-            consecutiveValidReadingsRef.current = 0;
             return;
         }
 
         setLocationStatus('checking');
-        const locationHistoryRef = React.createRef<GeolocationCoordinates[]>();
-        locationHistoryRef.current = [];
 
         const watcher = navigator.geolocation.watchPosition(
             (position) => {
-                const newHistory = [position.coords, ...(locationHistoryRef.current || [])].slice(0, STABILITY_THRESHOLD);
-                locationHistoryRef.current = newHistory;
-                
-                if (isMockLocation(position, newHistory, stagnantCoordsCountRef, stagnantAccuracyCountRef)) {
-                    consecutiveValidReadingsRef.current = 0; // Reset trust counter
+                // Since protection is disabled, we directly trust and set the location.
+                if (isMockLocation()) { // This will always be false
                     setLocationStatus('denied');
                     showToast('Lokasi tidak valid terdeteksi.', 'error');
                     setCurrentLocation(null);
                     return;
                 }
-                
-                consecutiveValidReadingsRef.current++;
                 setCurrentLocation(position.coords);
             },
             (error) => {
                 console.error("Geolocation error:", error);
-                consecutiveValidReadingsRef.current = 0; // Reset trust counter
                 setLocationStatus('denied');
                 showToast('Akses lokasi ditolak.', 'error');
             },
@@ -294,7 +203,6 @@ export const App: React.FC = () => {
 
         return () => {
              navigator.geolocation.clearWatch(watcher);
-             consecutiveValidReadingsRef.current = 0;
         }
     }, [currentUser, hasClockedInToday, showToast]);
 
@@ -332,10 +240,8 @@ export const App: React.FC = () => {
         });
     
         if (activeRules.length > 0) {
-            if (consecutiveValidReadingsRef.current >= MIN_VALID_READINGS_REQUIRED) {
-                setLocationStatus('allowed');
-                setAvailableAttendanceRules(activeRules);
-            }
+            setLocationStatus('allowed');
+            setAvailableAttendanceRules(activeRules);
         } else {
             setLocationStatus('out_of_range');
             setAvailableAttendanceRules([]);
@@ -524,9 +430,6 @@ export const App: React.FC = () => {
         setCurrentLocation(null);
         setAvailableAttendanceRules([]);
         setAllAttendanceRules([]);
-        consecutiveValidReadingsRef.current = 0;
-        stagnantCoordsCountRef.current = 0;
-        stagnantAccuracyCountRef.current = 0;
     };
     
     const handleAttendance = useCallback(async (rule: AturanAbsensi | null) => {
