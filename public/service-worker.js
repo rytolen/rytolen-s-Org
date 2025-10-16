@@ -1,8 +1,8 @@
-
 const CACHE_NAME = 'portal-karyawan-cache-v1';
 const URLS_TO_CACHE = [
   '/',
   '/index.html',
+  '/index.tsx',
   'https://cdn.tailwindcss.com',
   'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/dist/face-api.min.js',
   'https://aistudiocdn.com/react@^19.2.0',

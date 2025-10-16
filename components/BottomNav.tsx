@@ -1,4 +1,3 @@
-
 import React from 'react';
 import { Page } from '../types';
 
@@ -9,7 +8,7 @@ interface BottomNavProps {
 
 interface NavItemProps {
     label: string;
-    icon: React.ReactNode;
+    IconComponent: React.ElementType;
     isActive: boolean;
     onClick: () => void;
 }
@@ -31,12 +30,11 @@ const ProfileIcon = (props: React.SVGProps<SVGSVGElement>) => (
 );
 
 
-const NavItem: React.FC<NavItemProps> = ({ label, icon, isActive, onClick }) => {
+const NavItem: React.FC<NavItemProps> = ({ label, IconComponent, isActive, onClick }) => {
     const activeClass = isActive ? 'text-sky-600' : 'text-slate-500';
     return (
         <button onClick={onClick} className={`flex flex-col items-center justify-center gap-1 w-full transition-colors duration-200 ease-in-out ${activeClass} hover:text-sky-500`}>
-            {/* FIX: Cast icon to a ReactElement with 'any' props to allow adding className and resolve TypeScript overload error. */}
-            {React.cloneElement(icon as React.ReactElement<any>, { className: 'w-6 h-6' })}
+            <IconComponent className="w-6 h-6" />
             <span className="text-xs font-medium">{label}</span>
         </button>
     );
@@ -44,11 +42,11 @@ const NavItem: React.FC<NavItemProps> = ({ label, icon, isActive, onClick }) => 
 
 const BottomNav: React.FC<BottomNavProps> = ({ activePage, onNavigate }) => {
     const navItems = [
-        { page: Page.HOME, label: 'Beranda', icon: <HomeIcon /> },
-        { page: Page.HISTORY, label: 'Riwayat', icon: <HistoryIcon /> },
-        { page: Page.LEAVE, label: 'Cuti', icon: <LeaveIcon /> },
-        { page: Page.SALARY, label: 'Gaji', icon: <SalaryIcon /> },
-        { page: Page.PROFILE, label: 'Profil', icon: <ProfileIcon /> },
+        { page: Page.HOME, label: 'Beranda', IconComponent: HomeIcon },
+        { page: Page.HISTORY, label: 'Riwayat', IconComponent: HistoryIcon },
+        { page: Page.LEAVE, label: 'Cuti', IconComponent: LeaveIcon },
+        { page: Page.SALARY, label: 'Gaji', IconComponent: SalaryIcon },
+        { page: Page.PROFILE, label: 'Profil', IconComponent: ProfileIcon },
     ];
 
     return (
@@ -58,7 +56,7 @@ const BottomNav: React.FC<BottomNavProps> = ({ activePage, onNavigate }) => {
                     <NavItem
                         key={item.page}
                         label={item.label}
-                        icon={item.icon}
+                        IconComponent={item.IconComponent}
                         isActive={activePage === item.page}
                         onClick={() => onNavigate(item.page)}
                     />

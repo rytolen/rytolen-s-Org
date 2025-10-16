@@ -8,6 +8,7 @@ import FaceScanner from './components/FaceScanner';
 import Toast from './components/Toast';
 import LoginPage from './pages/LoginPage';
 import DivisionSelectionModal from './components/DivisionSelectionModal';
+import InstallPwaPrompt from './components/InstallPwaPrompt';
 import { supabase } from './lib/supabase';
 
 import { AttendanceRecord, Page, UserProfile, LeaveRequest, LeaveStatus, SalarySlip, FaceDescriptor, AturanAbsensi } from './types';
@@ -179,6 +180,44 @@ export const App: React.FC = () => {
     const stagnantAccuracyCountRef = useRef(0);
     const consecutiveValidReadingsRef = useRef(0);
     
+    // PWA Install Prompt State
+    const [installPromptEvent, setInstallPromptEvent] = useState<Event | null>(null);
+    const [isInstallPromptVisible, setInstallPromptVisible] = useState(false);
+
+    // --- PWA Install Logic ---
+    useEffect(() => {
+      const handleBeforeInstallPrompt = (e: Event) => {
+        e.preventDefault();
+        setInstallPromptEvent(e);
+        // Show the prompt after a short delay to not be intrusive
+        setTimeout(() => setInstallPromptVisible(true), 3000); 
+      };
+
+      window.addEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+
+      return () => {
+        window.removeEventListener('beforeinstallprompt', handleBeforeInstallPrompt);
+      };
+    }, []);
+    
+    const handleInstall = async () => {
+        if (!installPromptEvent) return;
+        (installPromptEvent as any).prompt();
+        const { outcome } = await (installPromptEvent as any).userChoice;
+        if (outcome === 'accepted') {
+            console.log('User accepted the A2HS prompt');
+        } else {
+            console.log('User dismissed the A2HS prompt');
+        }
+        setInstallPromptEvent(null);
+        setInstallPromptVisible(false);
+    };
+
+    const handleDismissInstall = () => {
+        setInstallPromptEvent(null);
+        setInstallPromptVisible(false);
+    };
+
 
     // --- Navigation Logic ---
     const handleNavigate = useCallback((page: Page) => {
@@ -636,6 +675,10 @@ export const App: React.FC = () => {
             <main>
                 {renderPage()}
             </main>
+
+            {isInstallPromptVisible && installPromptEvent && (
+                <InstallPwaPrompt onInstall={handleInstall} onDismiss={handleDismissInstall} />
+            )}
 
             {isDivisionModalVisible && (
                 <DivisionSelectionModal
