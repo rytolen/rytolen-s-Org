@@ -179,7 +179,8 @@ export const App: React.FC = () => {
 
     // Geolocation watcher
     useEffect(() => {
-        if (!currentUser || hasClockedInToday) {
+        // Pause GPS tracking if face scanner is active to prevent re-renders
+        if (!currentUser || hasClockedInToday || isFaceScannerVisible) {
             return;
         }
 
@@ -207,7 +208,7 @@ export const App: React.FC = () => {
         return () => {
              navigator.geolocation.clearWatch(watcher);
         }
-    }, [currentUser, hasClockedInToday, showToast]);
+    }, [currentUser, hasClockedInToday, isFaceScannerVisible, showToast]);
 
 
     // Location validation logic
