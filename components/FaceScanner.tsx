@@ -25,9 +25,9 @@ const getChallengeInstruction = (challenge: LivenessChallenge | null): string =>
     }
 };
 
-// Optimization: Lower input size and less frequent detection for mobile
 const TINY_FACE_OPTIONS = new faceapi.TinyFaceDetectorOptions({ inputSize: 128 });
-const DETECTION_INTERVAL = 200; // ms, lighter on mobile CPU
+const DETECTION_INTERVAL = 200; 
+const SMOOTHING_BUFFER_SIZE = 3; // Average over the last 3 frames to smooth out jitter
 
 const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onSuccess, onCancel, registeredDescriptor }) => {
     const videoRef = useRef<HTMLVideoElement>(null);
@@ -41,8 +41,8 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onSuccess, onCancel, re
 
     const baselineRef = useRef<{ yaw: number; pitch: number } | null>(null);
     const isFailureHandledRef = useRef(false);
+    const angleHistoryRef = useRef<{ yaw: number; pitch: number }[]>([]);
 
-    // --- Model Loading ---
     useEffect(() => {
         const loadModels = async () => {
             const MODEL_URL = 'https://cdn.jsdelivr.net/npm/face-api.js@0.22.2/weights';
@@ -62,7 +62,6 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onSuccess, onCancel, re
         loadModels();
     }, []);
 
-    // --- Camera Setup ---
     useEffect(() => {
         if (!modelsLoaded) return;
 
@@ -91,9 +90,7 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onSuccess, onCancel, re
         };
     }, [modelsLoaded]);
     
-    // --- Liveness Challenge Setup ---
     useEffect(() => {
-        // Create a randomized list of 2 challenges
         const shuffled = [...challenges].sort(() => 0.5 - Math.random());
         setLivenessChallenges(shuffled.slice(0, 2));
     }, []);
@@ -110,12 +107,10 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onSuccess, onCancel, re
     }, [onCancel]);
 
 
-    // --- Core Detection Loop ---
     useEffect(() => {
         if (!modelsLoaded || detectionState !== 'detecting') return;
 
-        // Fix: Use `number` for the return type of `setInterval` in a browser environment, not `NodeJS.Timeout`.
-        let detectionInterval: number;
+        let detectionIntervalId: number;
         const timeoutTimer = setTimeout(() => handleFailure('Verifikasi gagal: Waktu habis.'), 15000);
 
         const detect = async () => {
@@ -130,16 +125,15 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onSuccess, onCancel, re
             if (canvasRef.current && videoRef.current) {
                 const displaySize = { width: videoRef.current.clientWidth, height: videoRef.current.clientHeight };
                 faceapi.matchDimensions(canvasRef.current, displaySize);
+                 const context = canvasRef.current.getContext('2d');
+                context?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
                 if (detections) {
                     const resizedDetections = faceapi.resizeResults(detections, displaySize);
                     faceapi.draw.drawDetections(canvasRef.current, resizedDetections);
-                } else {
-                     canvasRef.current.getContext('2d')?.clearRect(0, 0, canvasRef.current.width, canvasRef.current.height);
                 }
             }
 
             if (!detections) {
-                 baselineRef.current = null; // Reset baseline if face is lost
                  return;
             }
 
@@ -167,25 +161,36 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onSuccess, onCancel, re
                 }
                 return;
             }
+            
+            // --- Signal Smoothing Logic ---
+            const { yaw: rawYaw, pitch: rawPitch } = getHeadAngles(detections.landmarks.getNose(), detections.landmarks.getJawOutline());
+            
+            angleHistoryRef.current.push({ yaw: rawYaw, pitch: rawPitch });
+            if (angleHistoryRef.current.length > SMOOTHING_BUFFER_SIZE) {
+                angleHistoryRef.current.shift();
+            }
 
-            // Liveness Logic
-            const { yaw, pitch } = getHeadAngles(detections.landmarks.getNose(), detections.landmarks.getJawOutline());
+            const smoothedYaw = angleHistoryRef.current.reduce((acc, v) => acc + v.yaw, 0) / angleHistoryRef.current.length;
+            const smoothedPitch = angleHistoryRef.current.reduce((acc, v) => acc + v.pitch, 0) / angleHistoryRef.current.length;
+
+
             const currentChallenge = livenessChallenges[currentChallengeIndex];
 
             if (challengeStatus === 'waiting') {
-                baselineRef.current = { yaw, pitch };
+                baselineRef.current = { yaw: smoothedYaw, pitch: smoothedPitch };
                 setChallengeStatus('in_progress');
                 setInstruction(getChallengeInstruction(currentChallenge));
+                angleHistoryRef.current = []; // Reset for new challenge
             } else if (challengeStatus === 'in_progress') {
                 let moved = false;
-                const YAW_THRESHOLD = 0.3;
-                const PITCH_THRESHOLD = 0.2;
+                const YAW_THRESHOLD = 0.35; // Slightly more generous threshold
+                const PITCH_THRESHOLD = 0.25;
                 
                 switch(currentChallenge) {
-                    case 'turnLeft': moved = yaw - baselineRef.current!.yaw > YAW_THRESHOLD; break;
-                    case 'turnRight': moved = yaw - baselineRef.current!.yaw < -YAW_THRESHOLD; break;
-                    case 'nodUp': moved = pitch - baselineRef.current!.pitch < -PITCH_THRESHOLD; break;
-                    case 'nodDown': moved = pitch - baselineRef.current!.pitch > PITCH_THRESHOLD; break;
+                    case 'turnLeft': moved = smoothedYaw - baselineRef.current!.yaw > YAW_THRESHOLD; break;
+                    case 'turnRight': moved = smoothedYaw - baselineRef.current!.yaw < -YAW_THRESHOLD; break;
+                    case 'nodUp': moved = smoothedPitch - baselineRef.current!.pitch < -PITCH_THRESHOLD; break;
+                    case 'nodDown': moved = smoothedPitch - baselineRef.current!.pitch > PITCH_THRESHOLD; break;
                 }
 
                 if (moved) {
@@ -193,7 +198,7 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onSuccess, onCancel, re
                     setInstruction('Kembali ke posisi semula');
                 }
             } else if (challengeStatus === 'returning') {
-                const returned = Math.abs(yaw - baselineRef.current!.yaw) < 0.15 && Math.abs(pitch - baselineRef.current!.pitch) < 0.1;
+                const returned = Math.abs(smoothedYaw - baselineRef.current!.yaw) < 0.2 && Math.abs(smoothedPitch - baselineRef.current!.pitch) < 0.15;
                 if (returned) {
                     const nextIndex = currentChallengeIndex + 1;
                     if (nextIndex >= livenessChallenges.length) {
@@ -207,10 +212,10 @@ const FaceScanner: React.FC<FaceScannerProps> = ({ mode, onSuccess, onCancel, re
             }
         };
 
-        detectionInterval = setInterval(detect, DETECTION_INTERVAL);
+        detectionIntervalId = setInterval(detect, DETECTION_INTERVAL);
 
         return () => {
-            clearInterval(detectionInterval);
+            clearInterval(detectionIntervalId);
             clearTimeout(timeoutTimer);
         };
     }, [modelsLoaded, detectionState, challengeStatus, currentChallengeIndex, livenessChallenges, handleFailure, mode, onSuccess, registeredDescriptor]);
