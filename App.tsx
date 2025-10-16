@@ -173,7 +173,6 @@ export const App: React.FC = () => {
     const [attendanceRulesError, setAttendanceRulesError] = useState<string | null>(null);
     const [isDivisionModalVisible, setDivisionModalVisible] = useState(false);
     const [selectedRuleForAttendance, setSelectedRuleForAttendance] = useState<AturanAbsensi | null>(null);
-    const [locationHistory, setLocationHistory] = useState<GeolocationCoordinates[]>([]);
     
     // Refs for mock location detection
     const stagnantCoordsCountRef = useRef(0);
@@ -255,23 +254,23 @@ export const App: React.FC = () => {
         setToast({ message, type });
     }, []);
 
-    // Geolocation watcher
+    // Geolocation watcher - REVAMPED to be stable
     useEffect(() => {
         if (!currentUser || hasClockedInToday) {
-            // Stop watching if user is not logged in or has already clocked in
             stagnantCoordsCountRef.current = 0;
             stagnantAccuracyCountRef.current = 0;
             consecutiveValidReadingsRef.current = 0;
             return;
         }
 
-        // Set initial status to checking
         setLocationStatus('checking');
+        const locationHistoryRef = React.createRef<GeolocationCoordinates[]>();
+        locationHistoryRef.current = [];
 
         const watcher = navigator.geolocation.watchPosition(
             (position) => {
-                const newHistory = [position.coords, ...locationHistory].slice(0, STABILITY_THRESHOLD);
-                setLocationHistory(newHistory);
+                const newHistory = [position.coords, ...(locationHistoryRef.current || [])].slice(0, STABILITY_THRESHOLD);
+                locationHistoryRef.current = newHistory;
                 
                 if (isMockLocation(position, newHistory, stagnantCoordsCountRef, stagnantAccuracyCountRef)) {
                     consecutiveValidReadingsRef.current = 0; // Reset trust counter
@@ -281,7 +280,6 @@ export const App: React.FC = () => {
                     return;
                 }
                 
-                // If the signal is valid, increment the trust counter
                 consecutiveValidReadingsRef.current++;
                 setCurrentLocation(position.coords);
             },
@@ -296,18 +294,17 @@ export const App: React.FC = () => {
 
         return () => {
              navigator.geolocation.clearWatch(watcher);
-             consecutiveValidReadingsRef.current = 0; // Reset on cleanup
+             consecutiveValidReadingsRef.current = 0;
         }
-    }, [currentUser, hasClockedInToday, showToast, locationHistory]);
+    }, [currentUser, hasClockedInToday, showToast]);
 
-    // Location validation logic - REVAMPED to prevent loops
+
+    // Location validation logic
     useEffect(() => {
-        // Do nothing if we don't have the necessary data yet. The status will remain 'checking'.
         if (!currentLocation || !currentUser || isHomePageLoading) {
             return;
         }
     
-        // If there was an error loading rules or the rules are empty, set to out_of_range.
         if (attendanceRulesError || allAttendanceRules.length === 0) {
             setLocationStatus('out_of_range');
             setAvailableAttendanceRules([]);
@@ -335,14 +332,11 @@ export const App: React.FC = () => {
         });
     
         if (activeRules.length > 0) {
-            // Only allow attendance if we have a few consecutive valid readings to trust the signal.
             if (consecutiveValidReadingsRef.current >= MIN_VALID_READINGS_REQUIRED) {
                 setLocationStatus('allowed');
                 setAvailableAttendanceRules(activeRules);
             }
-            // If not trusted yet, the status implicitly remains 'checking'. No need to set it again.
         } else {
-            // If in range of no rules, user is out of range.
             setLocationStatus('out_of_range');
             setAvailableAttendanceRules([]);
         }
@@ -530,7 +524,6 @@ export const App: React.FC = () => {
         setCurrentLocation(null);
         setAvailableAttendanceRules([]);
         setAllAttendanceRules([]);
-        setLocationHistory([]);
         consecutiveValidReadingsRef.current = 0;
         stagnantCoordsCountRef.current = 0;
         stagnantAccuracyCountRef.current = 0;
